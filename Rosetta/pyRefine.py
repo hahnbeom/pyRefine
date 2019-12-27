@@ -3,7 +3,7 @@ import copy,random,math
 import pyrosetta as PR #call explicitly
 import SamplingOperators as SO
 import rosetta_utils
-import reference_correction
+import estogram2cst
 
 # initialize pyRosetta
 #should be initialized in main
@@ -109,12 +109,13 @@ def arg_parser(argv):
         sys.exit(1)
 
     # support for Rosetta style flags file
+    # should support multiple flags (e.g. @flag1 @flag2 -s init.pdb ...)
     for arg in copy.copy(argv):
         if arg[0] == '@':
             if not os.path.exists(arg[1:]):
                 sys.exit('Flags file "%s" does not exist!'%arg[1:])
             for l in open(arg[1:]):
-                if l.startswith('#'): continue
+                if not l.startswith('-'): continue
                 argv += l[:-1].strip().split()
             argv.remove(arg)
 
@@ -531,10 +532,16 @@ class Runner:
 
         # Cen constraints
         if self.opt.cen_cst.endswith('npz'): # from DL
-            dmtrx = rosetta_utils.pose2dmtrx(pose0)
-            Pcorr = reference_correction.run(dmtrx,self.opt.cen_cst,
-                                             self.opt.refcorrection_method)
-            rosetta_utils.lazy_splinecst(pose0,Pcorr)
+            #temporary
+            self.opt.Pcore = [0.6,0.7,0.8]
+            self.opt.Pspline_on_fa=0.0 #
+            self.opt.Pcontact_cut =0.9
+            self.opt.hardcsttype="bounded",
+            self.refcorrection_method="statQ"
+            
+            estogram2cst.apply_on_pose( pose0,npz=self.opt.cen_cst,
+                                        opt=self.opt )
+            
         elif self.opt.cen_cst != None:
             constraints = PR.rosetta.protocols.constraint_movers.ConstraintSetMover()
             constraints.constraint_file(opt.cen_cst)

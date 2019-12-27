@@ -1,5 +1,6 @@
 import sys,os,copy
 from math import sqrt
+import numpy as np
 
 ###### simple math to replace someday....
 def normalize(v1):
@@ -148,7 +149,7 @@ def read_d0mtrx(pdb,nres=-1,byresno=False):
 def list2part(inlist):
     partlist = []
     for i,comp in enumerate(inlist):
-        if isinstance(comp,int):
+        if isinstance(comp,int) or isinstance(comp,np.int64):
             if i == 0 or abs(comp-prv) != 1:
                 partlist.append([comp])
             else:
@@ -158,6 +159,9 @@ def list2part(inlist):
                 partlist.append([comp])
             else:
                 partlist[-1].append(comp)
+        else:
+            print("comp is neither int nor str: ",type(comp))
+            sys.exit()
         prv = comp
     return partlist
 
