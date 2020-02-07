@@ -1,0 +1,26 @@
+PoseInfo.py: Contains all "Static" info about pose
+TERM.py: Contains all "Static" info about TERM definitions
+
+Matcher.py:
+*class MatchSolution
+- Given PoseInfo 
+
+*class Matcher
+Logic:
+0. Get SSinfo from PoseInfo...
+ - pyRefine reads pose and builds PoseInfo given "SS definitions"
+ - SSdef == Jump def 
+
+1. Get list of Anchor(s) & "ULR"
+ - Anchor could be 1 or 2 SSclass
+ - Find registers if is 2-SS-anchor
+ - ULR should be 1 SSclass
+
+2. Define Anchor-ULR match as MatchSolution
+ - find possible list of Threads: MatchSolution has multiple threads
+ - either seq-only OR estogram
+ 
+3. Matcher searches consistent TERM indices for given MatchSolutions
+ - dump 
+ - dump in some npz form of coordinates?
+ 

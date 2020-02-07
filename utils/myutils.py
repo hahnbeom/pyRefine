@@ -333,7 +333,25 @@ def betainfo_fromdssp(pdbfile,min_strand_len=0):
                     pairings.append([i,j])
     #return strands, strand_npaired, pairings
     return strands, coils, paired_res, pairings
-            
+
+def write_as_pdb(outf,crds):
+    out= open(outf,'w')
+    l = "ATOM     %2d  %-2s  UNK A  %2d    %8.3f%8.3f%8.3f  1.00  0.00           %s\n"
+    j = 0
+    print(outf, len(crds) )
+    for i,crd in enumerate(crds):
+        if len(crd) == 3:
+            out.write(l%(j,"CA",i,crds[i][0],crds[i][1],crds[i][2],'C'))
+            j += 1
+        else:
+            out.write(l%(j  ,"N", i,crds[i][0][0],crds[i][0][1],crds[i][0][2],'N'))
+            out.write(l%(j+1,"CA",i,crds[i][1][0],crds[i][1][1],crds[i][1][2],'C'))
+            out.write(l%(j+2,"C" ,i,crds[i][2][0],crds[i][2][1],crds[i][2][2],'C'))
+            out.write(l%(j+3,"O" ,i,crds[i][3][0],crds[i][3][1],crds[i][3][2],'O'))
+            #out.write(l%(j+4,"CB" ,i,crds[i][4][0],crds[i][4][1],crds[i][4][2],'C'))
+            j+=4
+    out.close()
+
 def blosum62(res1,res2):
     aaid = ['A','R','N','D','Q','C','E','G','H','I',
             'L','K', 'M','F','P','S','T','W','Y','V','B','J','Z']

@@ -4,6 +4,7 @@ import pyrosetta as PR #call explicitly
 import SamplingOperators as SO
 import rosetta_utils
 import estogram2cst
+import estogram2FT
 
 # initialize pyRosetta
 #should be initialized in main
@@ -27,9 +28,8 @@ def arg_parser(argv):
     opt.add_argument('-chunk_fn', dest='chunk_fn', metavar='CHUNK_FN', default=None,
                      help="TERM chunk search result file")
     opt.add_argument('-native', dest='native', default=None, help='Input ref file')
-    opt.add_argument('-ulr', dest='ulr_s', metavar='ULRs', nargs='+', default=[], \
-                     help='ULRs should be sampled. (e.g. 5-10 16-20). If not provided, whole structure will be sampled')
-
+    opt.add_argument('-npz', dest='npz', default=None, help='Outcome of DeepAccNet in npz format')
+    
     ## Output
     opt.add_argument('-prefix', dest='prefix', default="S", \
                      help='Prefix of output pdb file')
@@ -59,18 +59,23 @@ def arg_parser(argv):
     opt.add_argument('-fa_cst_w', dest='fa_cst_w', type=float, default=1.0, help='')
     opt.add_argument('-refcorrection_method', dest='refcorrection_method', default="none", help='')
     
-    ## Sampling options
-    #### relative weights
+    ###### Sampling options
+    ### relative weights
     opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[1.0,0.0,0.0], #fraginsert only
                      help="weights on movers [frag-insert/jump-opt/motif-insert]")
     
-    #### Jump-opt
-    #opt.add_argument('-chunk_cut', dest='chunk_cut', nargs='+', type=int, default=[],
-    #                 help="location of chunk cut positions")
+    ### Jump-opt
+    ## 1. Through Auto setup: no input args for ulr / sub_def
+    opt.add_argument('-autoFT', dest='autoFT', default=False, action='store_true', \
+                     help='automatically setup FT looking at estogram')
+
+    ## 2. or Through extra user-provided arguments 
+    opt.add_argument('-ulr', dest='ulr_s', metavar='ULRs', nargs='+', default=[], \
+                     help='ULRs should be sampled. (e.g. 5-10 16-20). If not provided, whole structure will be sampled')
     opt.add_argument('-sub_def', dest='sub_def', nargs='+', default=[],
                      help="definition of subs: argument same as -ulr")
-    
-    #### FragInsert
+                     
+    ### FragInsert
     opt.add_argument('-min_chunk_len', dest='min_chunk_len', nargs='+', type=int, default=[3,5,1000],
                      help="minimum length of SS defined as chunk [E/H/C]")
 
@@ -102,7 +107,7 @@ def arg_parser(argv):
                      help='per-res Fragment insertion weight input')
     #opt.add_argument('-fragbig_ntop', dest='fragbig_ntop', default=25,)
     #opt.add_argument('-fragsmall_ntop', dest='fragsmall_ntop', default=25,)
-    
+
     #
     if len(argv) < 1:
         opt.print_help()
@@ -134,48 +139,60 @@ def arg_parser(argv):
     params.ulrs = []
     for i,ulrstr in enumerate(params.ulr_s):
         params.ulrs.append( list(range( int(ulrstr.split('-')[0]), int(ulrstr.split('-')[-1])+1 )) )
-            
+
+    # check if any 
+    check_opt_consistency(params)
+        
     return params
 
+def check_opt_consistency(opt):
+    return True
 
-def get_residue_weights_from_opt(opt,disallowed,nres,nmer):
-    if not opt.verbose: print( "Fragment insertion disallowed: "+" %d"*len(disallowed)%tuple(disallowed))
+def get_residue_weights_from_opt(opt,FTInfo,nres,nmer):
+    if not opt.verbose:
+        print( "Fragment insertion disallowed: "+" %d"*len(disallowed)%tuple(disallowed))
 
     residue_weights = [0.0 for k in range(nres)]
     ulrres = []
     for ulr in opt.ulrs: ulrres += ulr
 
-    if opt.frag_insertion_mode == "weighted" and opt.resweights_fn != None:
-        # should replace by lddt prediction...
-        for l in open(opt.resweights_fn):
-            words = l[:-1].split()
-            resno = int(words[0])
-            residue_weights[resno-1] = float(words[1])
+    if opt.frag_insertion_mode == "weighted":
+        # 1. From user input
+        if opt.resweights_fn != None:
+            for l in open(opt.resweights_fn):
+                words = l[:-1].split()
+                resno = int(words[0])
+                residue_weights[resno-1] = float(words[1])
+            return residue_weights
+        
+        ## TODO
+        # 2. Using MinkTors
+        #elif opt.tors_npz:
 
-    elif opt.frag_insertion_mode == 'random': #classic way!
-        for res in range(nres-nmer+2):
-            nalned = 0.0
-            for k in range(nmer):
-                if res+k in disallowed: #do not allow insertion through disallowed res
-                    nalned = 0
-                    break 
-                if res+k not in ulrres: nalned += opt.aligned_frag_w
-                else: nalned += 1.0
-            residue_weights[res-1] = nalned
+        # 3rd. from CAdev estimation
+        elif FTInfo.CAdev != []:
+            residue_weights = np.log(FTInfo.CAdev/100.0+1.0) + opt.aligned_frag_w #log scale of CAdev, 1.0 at ULR, aligned_frag_w at core
+            return residue_weights
+        
+        else:
+            print("Weighted Frag Insertion failed: cannot detect resweights_fn nor AutoCAdev from .npz. Do random instead.")
+
+    # Otherwise binary
+    for res in range(nres-nmer+2):
+        nalned = 0.0
+        for k in range(nmer):
+            if res+k in disallowed: #do not allow insertion through disallowed res
+                nalned = 0
+                break 
+            if res+k not in ulrres: nalned += opt.aligned_frag_w
+            else: nalned += 1.0
+        residue_weights[res-1] = nalned
     return residue_weights
 
-def get_samplers(pose,opt,jump_anchors,
-                 anchors_movable=None):
+def get_samplers(pose,opt,FTInfo):
     opt_cons = copy.copy(opt)
     opt_cons.aligned_frag_w = 0.0
 
-    # make sure the length of jump_anchors == anchors_movable
-    if anchors_movable != None:
-        if len(jump_anchors) != len(anchors_movable):
-            sys.exit("Inconsistent anchor- & movable- definitions!!")
-    else:
-        anchors_movable = [True for anc in jump_anchors] # move all if not specified
-    
     main_units = []
     main_w = []
     pert_units = []
@@ -188,9 +205,9 @@ def get_samplers(pose,opt,jump_anchors,
     if opt.mover_weights[0] > 1.0e-6:
         w = opt.mover_weights[0]
 
-        residue_weights_big = get_residue_weights_from_opt(opt,jump_anchors,nres,9) ## hard-coded!!
-        residue_weights_small = get_residue_weights_from_opt(opt,jump_anchors,nres,3)
-        
+        residue_weights_big = get_residue_weights(opt,FTInfo,nres,9)
+        residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
+            
         # Mutation operator for initial perturbation
         mutOperator0 = SO.FragmentInserter(opt_cons,opt.fragbig,residue_weights_big,
                                            name="FragBigULR")
@@ -216,9 +233,9 @@ def get_samplers(pose,opt,jump_anchors,
 
     if opt.mover_weights[1] > 1.0e-6:
         w = opt.mover_weights[1]
-        perturber = SO.JumpSampler(opt,jump_anchors,anchors_movable,
+        perturber = SO.JumpSampler(opt,FTInfo,
                                    1.0,5.0,name="JumpBig")
-        refiner   = SO.JumpSampler(opt,jump_anchors,anchors_movable,
+        refiner   = SO.JumpSampler(opt,FTInfo,
                                    0.5,2.0,name="JumpSmall")
         pert_units += [perturber]
         pert_w += [w]
@@ -281,14 +298,15 @@ def MC(pose,scorer,sampler,opt,tot_it,
     return pose, accratio
 
 # Reproduced FT hybridize in Rosetta
-def FoldTreeSample(pose,opt,refpose=None,aln=None,mute=False):
+def FoldTreeSample(pose,opt,FTInfo,
+                   refpose=None,aln=None,mute=False):
     nres = pose.size()
-    ulrs = opt.ulrs
-    print( "ULR:", ulrs )
+    print( "ULR:", FTInfo.ulrs )
 
     # 0. Setup initial chunk insertion from extralib
     chunkOperator_extra = None
     chunks_pre_insert = []
+    ulrs = FTInfo.ulrs
     if opt.chunk_fn != None:
         chunkOperator_extra = SO.ChunkReplacer(opt)
         chunkOperator_extra.read_chunk_from_extralib(opt.chunk_fn)
@@ -304,51 +322,39 @@ def FoldTreeSample(pose,opt,refpose=None,aln=None,mute=False):
         else:
             print( "None of the extra chunks read is compatible with ULR definition. Skip pre-insertion stage.")
 
-    ## 1. FoldTree setup
-    jumps,movable = rosetta_utils.setup_fold_tree(pose,ulrs,opt,
-                                                  additional_SS_def=chunks_pre_insert)
-    # 1a. Then apply insertion
+    # 1. Apply chunk insertion if called
     if chunks_pre_insert != []:
         chunkOperator_extra.apply(pose) #start with a chunk inserted
         
-    jump_anchors = [jump[1] for jump in jumps] #anchor_res at chunk
     if opt.debug: pose.dump_pdb("ftsetup.pdb")
 
     ## 2. Sampling operators
     # originally fragment insertion prohibitted at jump_anchors
     # -- should revisit?? (or, instead on cuts)
-    perturber, inserter, refiner = get_samplers(pose,opt,jump_anchors,
-                                                anchors_movable=movable)
+    perturber, inserter, refiner = get_samplers(pose,opt,FTInfo)
        
     # 3. Score setup: term weights adjusted by scheduler
     scorer = Scorer(opt) 
     
     if not mute: print( "Starting score: %8.3f"%scorer.score(pose))
+
     # 4. pre-MC:
     ## slightly randomize at the beginning; make extended at ULR
-    for ulr in ulrs:
-        for res in ulr:
-            pose.set_phi(res,-150.0)
-            pose.set_psi(res, 150.0)
-            pose.set_omega(res, 180.0)
+    SO.perturb_pose_given_ft_setup( pose, FTInfo )
     if opt.debug: pose.dump_pdb("stage0.pdb")
     
     # 5. MC
     scheduler = Scheduler(opt)
-    #if opt.sch_fn != '':
-    #    scheduler = read_scheduler_from_file(opt.sch_fn)
+    #if opt.sch_fn != '':  scheduler = read_scheduler_from_file(opt.sch_fn)
 
     for it in range(scheduler.nstages()):
         scheduler.adjust_scorer(it,scorer)
         niter = scheduler.get_niter(it)
         if not mute: print("Running MC stage%d with n_iter %d..."%(it+1,niter))
 
-        if it == 0:
-            sampler = perturber
-        elif it == scheduler.nstages()-1:
-            sampler = refiner
-        else:
-            sampler = inserter
+        if it == 0: sampler = perturber
+        elif it == scheduler.nstages()-1: sampler = refiner
+        else: sampler = inserter
 
         score0 = scorer.score(pose)
         pose,accratio = MC(pose,scorer,sampler,opt,niter,
@@ -528,7 +534,7 @@ class Runner:
             aln = PR.rosetta.core.sequence.align_naive(seq,natseq)
             
         # store original FT
-        ft = pose0.conformation().fold_tree().clone()
+        ft0 = pose.conformation().fold_tree().clone()
 
         # Cen constraints
         if self.opt.cen_cst.endswith('npz'): # from DL
@@ -549,16 +555,21 @@ class Runner:
 
         nsample_cen = self.opt.nstruct*self.opt.batch_per_relax
 
+        # setup FTInfo: ULR, Sub definitions, and so on...
+        FTInfo = estogram2FT.main( opt.npz, pose, opt )
+            
         # Repeat Centroid-MC nsample_cen times
         poses_store = []
         for modelno in range(nsample_cen):
             pose = pose0.clone()
             if not self.opt.mute: print("Generating %d/%d structure..."%(modelno+1,nsample_cen))
             # Coarse-grained sampling stage
-            pose,score = FoldTreeSample(pose,self.opt,refpose,aln,self.opt.mute) 
+            pose,score = FoldTreeSample(pose,self.opt,
+                                        FTInfo,
+                                        refpose,aln,self.opt.mute) 
 
             # recover original fully-connected FT
-            rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft)
+            rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
             pose.remove_constraints()
             poses_store.append((score,pose))
 
