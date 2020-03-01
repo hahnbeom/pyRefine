@@ -64,9 +64,10 @@ class MatchSolution:
         self.t = t
         self.tag = tag
 
+        self.SSs = [] # empty at construction -- filled by function redefine_resrange
         self.SSs_term = SSs_term
         self.anchor_com = anchor_com
-        self.anchorres = anchorres
+        self.anchorres = anchorres #res at pose
         #self.SSorder = SSorder #permutation in TERM. e.g, [0,2,1]
         
         self.index = index # Term index
@@ -80,25 +81,51 @@ class MatchSolution:
             self.SSs_term[iSS].bbcrds_al = acrd_al
             self.SSs_term[iSS].CAcrds_al = acrd_al[:,1]
 
+    def redefine_resrange(self,query,posreslist,ulr=[]):
+        for i,SSterm in enumerate(self.SSs_term):
+            if i in ulr:
+                # redefine position
+                shift = SSterm.cenres-query[i].cenres
+                SSterm.begin  -= shift
+                SSterm.end    -= shift
+                SSterm.cenres -= shift
+                SSterm.reslist = range(SSterm.begin,SSterm.end+1)
+                self.SSs.append(SSterm)
+            else:
+                resmap = query[i].reslist
+                # central residue in TERM out of anchor frame
+                if SSterm.cenpos >= len(resmap): return False
+                half = int(len(resmap)/2)
+                i1 = max(0,SSterm.cenpos-half)
+                n = 2*half+1
+
+                bres = resmap[i1]
+                eres = bres+n-1
+                if eres not in posreslist: return False
+
+                SSterm.reslist = range(bres,eres+1)
+                subSS = SSterm.make_subSS(i1,i1+n-1,begin=bres)
+                self.SSs.append(subSS)
+        return True
+            
     def write_as_pdb(self,outpdb):
         crds = np.zeros((0,5,3))
-        for SS in self.SSs_term: 
+        chainno = []
+        for i,SS in enumerate(self.SSs_term): 
             crds = np.concatenate((crds,SS.bbcrds_al))
-        write_as_pdb(outpdb,crds)
-        
-    # Used in Matcher... moved from SSclass
-    def find_threads(self,
-                     estogram,SSpred,
-                     seqscorecut=0.3):
-        
+            chainno += [i for res in SS.reslist]
+        write_as_pdb(outpdb,crds,chainno=chainno)
+
+    # Used in Matcher
+    def score_threads(self,estogram,SSpred):
         # make sure len of SSmatch < len of ULR
         seq1 = ULR
         seq2 = SSmatch.seq
         n = len(seq2)
 
-        # weight more on close-to-refpos
+        # weight more on close-to-cenpos
         half = int(n/2)
-        w = np.array([max(0,half-abs(SSmatch.refpos-i)) for i in range(n)])
+        w = np.array([max(0,half-abs(SSmatch.cenpos-i)) for i in range(n)])
         w /= np.sum(w)
 
         score_SS  = 0.0 # match to SSpred
@@ -139,7 +166,8 @@ class TERMClass:
 
         # List of reference frame from Pose: [x1,y1,z1,x2,y2,z2]
         crd_r = np.zeros((0,3))
-        for SS in query[:-1]: crd_r = np.concatenate((crd_r,SS.frame))
+        for SS in query[:-1]:
+            crd_r = np.concatenate((crd_r,SS.frame))
 
         # Search through different permutations
         # in segorder [:n-1] are reference, the final is ULR-SS
@@ -166,13 +194,13 @@ class TERMClass:
         
         if len(sortable) <= 1: return solutions
         sortable.sort()
-        
+
         ancres_in_pose = [SS.cenres for SS in query] #static
         for isol,(rmsd,segorder,U,t,anccom) in enumerate(sortable):
             if rmsd > rmsd_match_cut: break 
 
             #always ulr goes last
-            SSs_reordered = [copy.deepcopy(self.SSs[i]) for i in segorder] 
+            SSs_reordered = [copy.deepcopy(self.SSs[i]) for i in segorder]
             match = MatchSolution( U, t,
                                    SSs_reordered, anccom,
                                    self.index,
@@ -203,6 +231,10 @@ class TERMDB:
         self.db = [] #list of TERMClass
         
         dbf = '%s/%s.chunklib'%(opt.config['TERM_DBPATH'],SStype)
+        if not os.path.exists(dbf):
+            print("Database file for %s %s not found! skip"%(SStype,dbf))
+            return
+            
         maxlibrank = opt.config['MAXLIBRANK'][SStype]
         self.read_dbfile(dbf,maxlibrank)
 
@@ -212,15 +244,19 @@ class TERMDB:
     def read_dbfile(self,dbfile,maxlibrank):
         self.db = []
         iSSprv = -1
+        skip = False
         for l in open(dbfile):
             #CHUNK tag N SS1 begin1 end1 seq1; SS2 begin2 end2 seq2;
             if l.startswith('CHUNK'):
                 strs = l[:-2].split(';')
+                skip = False
 
                 words = strs[0].split()
                 tag = words[1]
                 rank = int(tag)
-                if rank > maxlibrank: continue
+                if rank > maxlibrank:
+                    skip = True
+                    continue
                 nSS = int(words[2])
 
                 SSs = []
@@ -231,15 +267,28 @@ class TERMDB:
                     begin = int(words[1])
                     end = int(words[2])
                     seq = words[3]
-                    refpos = int(words[4])-begin
-                    SSseg = SSclass(SS,begin,end,refpos=refpos)
+                    cenpos = int(words[4])-begin
+                    SSseg = SSclass(SS,begin,end,cenpos=cenpos)
                     SSs.append(SSseg)
                     
                 term = TERMClass(SSs,tag="")
                 term.index = rank #tag
                 self.db.append(term)
+
+            elif l.startswith('TORS') and not skip:
+                words = l[:-1].split()
+                #TORS  iseg res phi psi omega
+                iSS = int(words[1])
+                SS = self.db[-1].SSs[iSS]
+                if iSS != iSSprv: ires = 0
+                
+                tors = np.array([float(words[3]),float(words[4]),float(words[5])])
+                SS.tors[ires] = tors
+
+                iSSprv = iSS
+                ires += 1
                     
-            elif l.startswith('COORD'):
+            elif l.startswith('COORD') and not skip:
                 if rank > maxlibrank: continue
                 words = l[:-1].split()
                 #COORD iseg res Nx Ny Nz CAx CAy CAz Cx Cy Cz Ox Oy Oz
@@ -260,7 +309,7 @@ class TERMDB:
                 ires += 1
                 
                 if ires == SS.nres:
-                    SS.get_frame()
+                    self.db[-1].SSs[iSS].get_frame()
 
         # validate
         #for i,term in enumerate(self.db):

@@ -1,16 +1,16 @@
 import os
-
-SCRIPTDIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 
 CONFIGS = {
     'MINRES_FOR_FRAME': 5, #hard-coded and unusred...
-    'SSTYPE_SUPPORTED': ['EE','HHH','HH','EEH','EEE'],
+    'SSTYPE_SUPPORTED': ['EE','HEE','HHH'], #['EE','HHH','HH','EEH','EEE'],
+    
     'TERM_DBPATH'     : '%s/TERMlib/'%SCRIPTDIR,
     'SEQSCORECUT'     : -1, # everything; use positive value to apply cut
-    'MAXLIBRANK'      : {'EE' :100,
+    'MAXLIBRANK'      : {'EE' :10000,
                          'HHH':1000,
                          'HH' :10000,
-                         'EEH':1000,
+                         'HEE':1000,
                          'EEE':1000
                           },
     'RMSD_MATCH_CUT'  : 2.0,

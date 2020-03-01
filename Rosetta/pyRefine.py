@@ -220,8 +220,8 @@ def get_samplers(pose,opt,FTInfo):
                                            name="FragSmall")
 
         # Chunk from template poses -- unimplemented yet
-        chunkOperator = SO.ChunkReplacer(opt)
-        chunkOperator.read_chunk_from_pose(pose)
+        #chunkOperator = SO.ChunkReplacer(opt)
+        #chunkOperator.read_chunk_from_pose(pose)
 
         pert_units += [mutOperator0]
         pert_w += [w]
@@ -231,6 +231,7 @@ def get_samplers(pose,opt,FTInfo):
         refine_w += [w]
         print("Make Fragment sampler with weight %.3f..."%w)
 
+    # Segment searcher also part of here, stub defs passed through FTInfo
     if opt.mover_weights[1] > 1.0e-6:
         w = opt.mover_weights[1]
         perturber = SO.JumpSampler(opt,FTInfo,
@@ -244,8 +245,6 @@ def get_samplers(pose,opt,FTInfo):
         refine_units += [refiner]
         refine_w += [w]
         print("Make     Jump sampler with weight %.3f..."%w)
-
-    # ChunkReplacer TODO
 
     print( [unit.name for unit in main_units] )
     print( main_w )
@@ -393,78 +392,6 @@ def report_pose(pose,tag,extra_score,outsilent,mute=False):
         if not mute: print( "Reporting pose to pdb %s..."%tag)
         pose.dump_pdb(tag)
 
-class Scorer:
-    def __init__(self,opt):
-        sfxn = PR.create_score_function("score3")
-        sfxn.set_weight(PR.rosetta.core.scoring.cen_hb, 5.0)
-        self.Edssp = 1e6
-        self.wdssp = 5.0
-        self.kT_mulfactor = 1.0
-        self.sfxn = sfxn
-        self.ss8 = []
-        if opt.ss_fn != None:
-            self.ss8 = np.load(opt.ss_fn)
-            # corrections to termini
-            self.ss8[0, :] = 1.0 / 8.0
-            self.ss8[-1, :] = 1.0 / 8.0
-            self.ss3 = np.zeros((len(self.ss8),3))
-            #BEGHIST_: H 2,3,4; E 0,1; L 5,6,7
-            self.ss3[:,0] = np.sum([self.ss8[:,2],self.ss8[:,3],self.ss8[:,4]],axis=0)
-            self.ss3[:,1] = np.sum([self.ss8[:,0],self.ss8[:,1]],axis=0)
-            self.ss3[:,2] = np.sum([self.ss8[:,5],self.ss8[:,6],self.ss8[:,6]],axis=0)
-            
-    def calc_dssp_agreement_score(self,pose,res_s):
-        dssp = PR.rosetta.core.scoring.dssp.Dssp(pose)
-        ss8_type = np.array(list("BEGHIST "), dtype='|S1').view(np.uint8)
-        ss3_type = np.array(list("HEL"), dtype='|S1').view(np.uint8)
-        dssp8 = np.array(list(dssp.get_dssp_unreduced_secstruct()), dtype='|S1').view(np.uint8)
-        dssp3 = np.array(list(dssp.get_dssp_secstruct()), dtype='|S1').view(np.uint8)
-        
-        for i in range(ss8_type.shape[0]):
-            dssp8[dssp8 == ss8_type[i]] = i
-            dssp8[dssp8 > 7] = 7 # coil
-
-        for i in range(ss3_type.shape[0]):
-            dssp3[dssp3 == ss3_type[i]] = i
-
-        E = 0.0
-        for res in res_s:
-            #E -= self.ss8[res-1,dssp8[res-1]]
-            E -= self.ss3[res-1,dssp3[res-1]]
-        return E*self.wdssp
-
-    def reset_wts(self,scoretype,wts):
-        self.sfxn.set_weight(scoretype, wts)
-    
-    def get_term(self,pose,scoretype):
-        return pose.energies().total_energies()[scoretype]
-
-    def reset_kT(self,val):
-        self.kT_mulfactor = 1.0
-        self.kT0 = val
-
-    def autotemp(self,it,tot_it,accratio):
-        '''
-        f_it = float(it)/tot_it
-        if f_it < 0.25:
-            pass
-        else:
-            if accratio > 0.5:
-                self.kT_mulfactor *= 0.5
-            elif accratio < 0.1:
-                self.kT_mulfactor *= 2.0
-        ''' #constant
-        return self.kT0*self.kT_mulfactor
-
-    def score(self,pose):
-        self.Edssp = 0.0
-        self.E = self.sfxn.score(pose)
-        if self.ss8 != []:
-            #for res in range(pose.size()):
-            #TODO: score only ulr? 
-            self.Edssp += self.calc_dssp_agreement_score(pose,range(1,pose.size()))
-        return self.E + self.Edssp
-
 class Scheduler:
     def __init__(self,opt):
         #self.load_dflt_sch()
@@ -556,35 +483,29 @@ class Runner:
         nsample_cen = self.opt.nstruct*self.opt.batch_per_relax
 
         # setup FTInfo: ULR, Sub definitions, and so on...
-        FTInfo = estogram2FT.main( opt.npz, pose, opt )
+        FTInfo = load_FTInfo( opt.ftinfo_fn )#estogram2FT.main( opt.npz, pose, opt )
             
         # Repeat Centroid-MC nsample_cen times
         poses_store = []
-        for modelno in range(nsample_cen):
-            pose = pose0.clone()
-            if not self.opt.mute: print("Generating %d/%d structure..."%(modelno+1,nsample_cen))
-            # Coarse-grained sampling stage
-            pose,score = FoldTreeSample(pose,self.opt,
-                                        FTInfo,
-                                        refpose,aln,self.opt.mute) 
+        pose = pose0.clone()
+    
+        # Coarse-grained sampling stage
+        pose,score = FoldTreeSample(pose,self.opt,
+                                    FTInfo,
+                                    refpose,aln,self.opt.mute) 
 
-            # recover original fully-connected FT
-            rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
-            pose.remove_constraints()
-            poses_store.append((score,pose))
+        # recover original fully-connected FT
+        rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
+        pose.remove_constraints()
+        poses_store.append((score,pose))
 
-            if not self.opt.mute and refpose != None:
-                gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
-                print("Centroid score: %8.3f, GDTMM %5.3f"%(score,gdtmm))
-            else:
-                print("Centroid score: %8.3f"%score)
+        if not self.opt.mute and refpose != None:
+            gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
+            print("Centroid score: %8.3f, GDTMM %5.3f"%(score,gdtmm))
+        else:
+            print("Centroid score: %8.3f"%score)
 
         poses_store.sort()
-        batch = [(score,pose) for (score,pose) in poses_store[:self.opt.nstruct]]
-
-        if not self.opt.mute:
-            print("Relaxing %d selected structures with cen_score range %.1f~%.1f."\
-                  %(self.opt.nstruct,batch[0][0],batch[-1][0]))
 
         # All-atom stage (skips relax if -cen_only on)
     
@@ -593,51 +514,47 @@ class Runner:
         fa_score.set_weight(PR.rosetta.core.scoring.coordinate_constraint, self.opt.fa_cst_w) 
         constraints = PR.rosetta.protocols.constraint_movers.ConstraintSetMover()
 
-        outposes = []
-        for modelno,(score,pose) in enumerate(batch):
-            if not self.opt.cen_only:
-                extra_score = [('score',score)]
-            
-                gdtmm = -1
-                if refpose != None and not self.opt.mute:
-                    gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
-                    print("GDTMM_cen: %5.3f"%(gdtmm))
-                    extra_score.append(('GDTMM_cen',gdtmm))
-                
-                tag = '%s_%04d.cen.pdb'%(self.opt.prefix,modelno)
-                if self.opt.write_pose:
-                    censilent = self.opt.outsilent.replace('.out','.cen.out')
-                    report_pose(pose,tag,extra_score,censilent,self.opt.mute)
-                
-                # maybe short-prerelax with cencst here to prevent blow-up?
-                if self.opt.fa_cst != None:
-                    constraints.constraint_file(self.opt.fa_cst)
-                    constraints.apply(pose)
-
-                rosetta_utils.relax(pose,fa_score)
-                if self.opt.verbose:
-                    fa_score.show(pose)
-                else:
-                    # not dumping log?
-                    #fa_score.show_line_headers(T)
-                    #fa_score.show_line(T, pose)
-                    pass
-                
-                score = fa_score.score(pose)
-            
+        if not self.opt.cen_only:
             extra_score = [('score',score)]
+            
             gdtmm = -1
             if refpose != None and not self.opt.mute:
                 gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
-                print("GDTMM_final: %5.3f"%(gdtmm))
-                extra_score.append(('GDTMM_final',gdtmm))
-            
-            tag = '%s_%04d.pdb'%(self.opt.prefix,modelno)
-            if self.opt.write_pose: report_pose(pose,tag,extra_score,self.opt.outsilent)
+                print("GDTMM_cen: %5.3f"%(gdtmm))
+                extra_score.append(('GDTMM_cen',gdtmm))
+                
+            tag = '%s_%04d.cen.pdb'%(self.opt.prefix,modelno)
+            if self.opt.write_pose:
+                censilent = self.opt.outsilent.replace('.out','.cen.out')
+                report_pose(pose,tag,extra_score,censilent,self.opt.mute)
+                
+            # maybe short-prerelax with cencst here to prevent blow-up?
+            if self.opt.fa_cst != None:
+                constraints.constraint_file(self.opt.fa_cst)
+                constraints.apply(pose)
 
-            outposes.append(pose)
+            rosetta_utils.relax(pose,fa_score)
+            if self.opt.verbose:
+                fa_score.show(pose)
+            else:
+                # not dumping log?
+                #fa_score.show_line_headers(T)
+                #fa_score.show_line(T, pose)
+                pass
+                
+            score = fa_score.score(pose)
             
-        return outposes
+        extra_score = [('score',score)]
+        gdtmm = -1
+        if refpose != None and not self.opt.mute:
+            gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
+            print("GDTMM_final: %5.3f"%(gdtmm))
+            extra_score.append(('GDTMM_final',gdtmm))
+            
+        tag = '%s_%04d.pdb'%(self.opt.prefix,modelno)
+        if self.opt.write_pose: report_pose(pose,tag,extra_score,self.opt.outsilent)
+
+        return pose
         
 if __name__ == "__main__":
     a = Runner()

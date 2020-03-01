@@ -20,7 +20,8 @@ class FragmentInserter:
                  frag_ntop=25,name="",report=False):
         frag_IO = rosetta.core.fragment.FragmentIO( frag_ntop )
         nres = len(residue_weights)
-        
+
+        self.history_count = np.zeros(nres) #0-index
         self.fragset = frag_IO.read_data(fragf) #FragSet
         self.nmer = self.fragset.max_frag_length() #should be identical in length through the library
 
@@ -51,6 +52,7 @@ class FragmentInserter:
     def apply(self,pose):
         insert_pos = random.choices(range(1,self.last_inspos+1),
                                     self.residue_weights[:self.last_inspos])[0]
+        self.history_count[insert_pos-1] += 1
 
         #print( "INS %d"%insert_pos )
         mm = MoveMap()
@@ -64,6 +66,12 @@ class FragmentInserter:
         mover = rosetta.protocols.simple_moves.ClassicFragmentMover(self.fragset, mm)
         mover.apply(pose)
 
+    def show(self):
+        l = ''
+        for i,val in enumerate(self.history_count):
+            if val > 0: l += ' %d:%d;'%(i+1,val)
+        print("Insertion sites:", l)
+        
 class Chunk:
     def __init__(self, chunk_id=-1, threadable=False):
         self.id = chunk_id
@@ -215,7 +223,7 @@ class ChunkReplacer:
 
 class JumpSampler:
     def __init__(self,
-                 FTInfo,
+                 anchors, #FTInfo,
                  maxtrans,
                  maxrot,
                  allowed_jumps=[],
@@ -224,12 +232,14 @@ class JumpSampler:
         # make a subset that are movable
         self.anchors = []
         if allowed_jumps == []:
-            for i,jump in enumerate(FTInfo.jumps):
-                if jump.movable: self.anchors.append(anc)
+        #    for i,jump in enumerate(FTInfo.jumps):
+        #        if jump.movable: self.anchors.append(anc)
+            self.anchors = anchors
         else:
-            for i in allowed_jumps:
-                jump = FTInfo.jumps[i]
-                if jump.movable: self.anchors.append(jump.anchor)
+            #for i in allowed_jumps:
+            #    jump = FTInfo.jumps[i]
+            #    if jump.movable: self.anchors.append(jump.anchor)
+            self.anchors = [anchors[i] for i in allowed_jumps]
                 
         self.name = name
         self.maxtrans = maxtrans
@@ -244,6 +254,7 @@ class JumpSampler:
 
         ## direction: 1 or -1 -- meaning?
         direction = 1
+        if random.random() < 0.5: direction = -1
         #simpler way: is this good enough
         jump.gaussian_move( direction, self.maxtrans, self.maxrot )
 

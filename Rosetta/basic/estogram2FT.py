@@ -35,25 +35,25 @@ def arg_parser(argv):
                         help="output .csv file")
 
     ## options for SubGraph
-    parser.add_argument("--conserve",
+    parser.add_argument("--subdef_conserve",
                         "-c", action="store",
                         type=float,
                         default=1.0,
                         help="threshold for errors [0.5, 1, 2, 4], default:1")
     
-    parser.add_argument("--confidence",
+    parser.add_argument("--subdef_confidence",
                         "-conf", action="store",
                         type=float,
                         default=0.5,
                         help="threshold for confidence [0~1], default:0.5")
 
-    parser.add_argument("--min_coverage",
+    '''parser.add_argument("--min_coverage",
                         action="store",
                         type=float,
                         default=0.0, #by default always converge
-                        help="Dynamically assign until this coverage")
+                        help="Dynamically assign until this coverage")'''
     
-    parser.add_argument("--density",
+    parser.add_argument("--subdef_density",
                         "-d", action="store",
                         type=float,
                         default=0.9,
@@ -67,8 +67,12 @@ def arg_parser(argv):
 
     ## options for ULR
     parser.add_argument("--ulrmode",
-                        default="binary",
-                        help="[binary/continuous]")
+                        default="conservative",
+                        help="[dynamic/conservative]")
+    parser.add_argument("--ulr_fmin",type=float,default=0.15,
+                        help="minimum fraction of residues assigned as ULR, default:0.9")
+    parser.add_argument("--ulr_fmax",type=float,default=0.25,
+                        help="minimum fraction of residues assigned as ULR, default:0.9")
 
 
     if len(argv) < 1:
@@ -84,16 +88,18 @@ def add_default_options_if_missing(opt=types.SimpleNamespace()):
     if not hasattr(opt,'debug'): opt.debug = False
 
     # Sub
-    if not hasattr(opt,"conserve"): opt.conserve = 1.0
-    if not hasattr(opt,"confidence"): opt.confidence = 0.5
+    if not hasattr(opt,"subdef_conserve"): opt.subdef_conserve = 1.0
+    if not hasattr(opt,"subdef_confidence"): opt.subdef_confidence = 0.5
     if not hasattr(opt,"min_coverage"): opt.min_coverage = 0.0
     if not hasattr(opt,"density"): opt.density = 0
     if not hasattr(opt,"algorithm"): opt.algorithm = 0
     if not hasattr(opt,"subs"): opt.subs = [] #placeholder
     
     # ULR
-    if not hasattr(opt,"ulrmode"): opt.ulrmode = "binary"
+    if not hasattr(opt,"ulrmode"): opt.ulrmode = "dynamic"
     if not hasattr(opt,"ulrs"): opt.ulrs = [] #placeholder
+    if not hasattr(opt,"ulr_fmin"): opt.ulr_fmin = 0.15
+    if not hasattr(opt,"ulr_fmax"): opt.ulr_fmax = 0.25
     #return opt
     
 def Qres2dev(Qres):
@@ -133,15 +139,19 @@ def estogram2ulr(estogram,opt):
         Qres_soft[i] /= n
 
     # 2. return either binary ULR pred or max-possible-deviation
-    ulr_cons = pred_ULR(Qlr,Qres_soft,fmin=0.15,fmax=0.25)
-    ulr_aggr = pred_ULR(Qlr,Qres_soft,dynamic=True)
+    if opt.ulrmode == 'dynamic':
+        ulrres = pred_ULR(Qlr,Qres_soft,dynamic=True)
+    else:
+        ulrres = pred_ULR(Qlr,Qres_soft,
+                        fmin=opt.ulr_fmin,
+                        fmax=opt.ulr_fmax)
 
     ##split to regions
-    ulr_cons = myutils.list2part(ulr_cons)
-    ulr_aggr = myutils.list2part(ulr_aggr)
+    # currently only two options...
+    ulrs = myutils.list2part(ulrres)
     
     # translate to max dev in Angstrom
-    return ulr_cons, ulr_aggr, Qres_soft
+    return ulrs, Qres_soft
 
 def pred_ULR(Q,Qres_soft,fmin=0.15,fmax=0.25,dynamic=False):        
     if dynamic: #make it aggressive!
@@ -364,11 +374,11 @@ def find_blocks2(g, vs=None, visualize=False, th=0.8):
 def estogram2sub(estogram,SS3,ulrs,opt):
     x = estogram ##just alias
     x = (x+np.transpose(x, [1,0,2]))/2
-    b = binrize_estogram(x, exclude=ulrs, threshold = opt.conserve)
+    b = binrize_estogram(x, exclude=ulrs, threshold = opt.subdef_conserve)
     nres = len(x)
     MINCONFCUT = 0.5 #lower confidence threshold until this value
 
-    confcut = opt.confidence
+    confcut = opt.subdef_confidence
     ncover_min = int(opt.min_coverage*nres)
     covered = [False for k in range(nres)]
 
@@ -437,47 +447,43 @@ def estogram2sub(estogram,SS3,ulrs,opt):
 
     return subdefs
 
-def main(pose,opt):
+# Use this main function for short CAdev/ULR analysis...
+def main(pose,opt,SS3=[]):
     data = np.load(opt.npz)
     estogram = data['estogram']
+    Qres = data['lddt']
 
     add_default_options_if_missing(opt)
 
-    dssp = PR.rosetta.core.scoring.dssp.Dssp(pose)
-    dssp.insert_ss_into_pose( pose );
-    SS3 = [pose.secstruct(ires) for ires in range(1,pose.size()+1)]
+    if SS3 == []:
+        dssp = PR.rosetta.core.scoring.dssp.Dssp(pose)
+        dssp.insert_ss_into_pose( pose );
+        SS3 = [pose.secstruct(ires) for ires in range(1,pose.size()+1)]
     
     # 1. Predict ULR
     if opt.debug: print("\n[estogram2FT] ========== ULR prediction ========")
-    ulr_cons, ulr_aggr, Qres = estogram2ulr(estogram,opt)
+    if opt.ulrs != []:
+        ulrs = opt.ulrs
+    else:
+        ulrs, Qres_corr = estogram2ulr(estogram,opt)
+        #opt.ulrmode = 'dynamic' #if want to try aggressive mode
+        #ulr_aggr, _ = estogram2ulr(estogram,opt)
 
-    # assign ulr if not provided as opt args
-    ulrs = opt.ulrs
-    if ulrs == []: ulrs = ulr_cons
-    
     # 1-a. assign maximum allowed deviation in coordinates
     maxdev = np.zeros(len(estogram))
-    for i,val in enumerate(Qres):
+    for i,val in enumerate(Qres_corr):
         maxdev[i] = Qres2dev(val) #fitting function
-    if opt.debug: print( "ULR detected: ", ulr_cons )
+        
+    if opt.debug:
+        print( "ULR detected: ")
+        for ulr in ulrs:
+            ulrconf = np.mean(Qres[ulr[0]-1:ulr[-1]]) #confidence of current struct
+            print( "%d-%d: confidence %.3f"%( ulr[0],ulr[-1],ulrconf) )
 
     # 2. Predict subs
     if opt.debug: print("\n[estogram2FT] ========== SubChunk assignment ========")
-    subdef = estogram2sub(estogram,SS3,ulr_cons,opt)
-
-    # 3. initiate FoldTreeInfo instance
-    # pass predictions to fold tree
-    ft = FoldTreeInfo(pose,opt) # pass ulr here?
-    ft.subs = subdef
+    subdef = estogram2sub(estogram,SS3,ulr,opt)
     
-    ft.CAdev = maxdev
-    ft.estimate_RG_magnitudes(maxdev)
-
-    # Finally setup fold tree given sub & ulr info
-    ft.setup_fold_tree(pose,opt,ulrs=ulrs)
-    
-    return ft
-        
 if __name__== "__main__":
     PR.init('-mute all')
 
