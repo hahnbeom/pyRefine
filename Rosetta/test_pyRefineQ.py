@@ -654,36 +654,38 @@ class Runner:
         pose = pose0.clone()
         jumpancs = simple_ft_setup(pose,self.opt.ulrs)
         print("JUMP ANCS: ", jumpancs)
-        #jumps_to_sample = [0,1,2,3] #0-index
-        jumps_to_sample = [1,4] #0-index
 
         self.opt.scoretype = "Q"
         scorer = Scorer(self.opt)
-        #residue_weights = [1.0 for k in range(nres)]
         residue_weights = np.array([0.1 for k in range(nres)])
-        residue_weights_p = np.array([1.0 for k in range(nres)])
+        residue_weights_p = np.array([0.0 for k in range(nres)])
+
+        for ulr in self.opt.ulrs:
+            for res in ulr:
+                residue_weights[res-1] = 1.0
+                residue_weights_p[res-1] = 1.0
 
         #TODO: (predicted)loop-weighted
-        # why not below working
         #residue_weights[:23] = 5.0
         #residue_weights[33:40] = 5.0
         #residue_weights[14:17] = 5.0
         #residue_weights[47:51] = 5.0
         
         sampler_p = SO.FragmentInserter(self.opt,self.opt.fragsmall,residue_weights_p,
-                                        name ="FragP")
+                                        name ="FragP") #perturber
+        
         sampler_b = SO.FragmentInserter(self.opt,self.opt.fragbig,residue_weights,
-                                        name ="FragBig")
+                                        name ="FragBig") 
         sampler_s = SO.FragmentInserter(self.opt,self.opt.fragsmall,residue_weights,
                                         name ="FragBig")
-        jumper_b   = SO.JumpSampler(jumpancs, #[jumpancs[i] for i in jumps_to_sample],
-                                    maxtrans=3.0,maxrot=10.0,
-                                    name="Jump") #HACK
-        jumper   = SO.JumpSampler([jumpancs[i] for i in jumps_to_sample],
-                                  maxtrans=1.5,maxrot=10.0,
-                                  name="Jump") #HACK
 
-        # minmover for jump only
+        # turn-off jumper til debugged
+        #jumps_to_sample = [1,4] #0-index
+        '''jumper   = SO.JumpSampler([jumpancs[i] for i in jumps_to_sample],
+                                  maxtrans=1.5,maxrot=10.0,
+                                  name="Jump") #HACK'''
+
+        # minmover for jump only -- unused
         sf = PR.create_score_function("score4_smooth")
         mmap = PR.MoveMap()
         mmap.set_bb(False)
@@ -691,26 +693,24 @@ class Runner:
         #minimize only relevant DOF to make minimizer faster
         for i,p in enumerate(residue_weights):
             if p > 1.0: mmap.set_bb(i+1,True)
-        for jumpno in jumps_to_sample:
-            mmap.set_jump(jumpno+1,True)
+        #for jumpno in jumps_to_sample:
+        #    mmap.set_jump(jumpno+1,True)
         
         jump_minimizer = PR.rosetta.protocols.minimization_packing.MinMover(mmap, sf, 'lbfgs_armijo_nonmonotone', 0.0001, True) 
         jump_minimizer.max_iter(5)
 
         ## Coarse-grained sampling stage
-
         #perturb initially
         sampler_p.apply(pose)
-        
-        jumper_b.apply(pose) 
+        #jumper.apply(pose) 
         Emin = scorer.score([pose])[0]
         print("Einit ",Emin)
         pose.dump_pdb("ipert.pdb")
         pose_min = pose
 
         #moves = [jumper]
-        moves = [sampler_s]
-        weights = []#[1.0,0.5]
+        moves = [sampler_s,sampler_b]
+        weights = [] #[1.0,0.5] #uniform is unspecified
         for it in range(50):
             pose_in = pose_min
             pose_out, Eout = branch_and_select_1step(pose_in,moves,scorer,50,
@@ -725,7 +725,7 @@ class Runner:
             if Eout < Emin: #annealing
                 pose_min = pose_out
                 Emin = Eout
-            pose_out.dump_pdb("out%02d.pdb"%(it))
+            pose_out.dump_pdb("out%02d.pdb"%(it)) #dump all trj regardless of acceptance
 
         # recover original fully-connected FT
         rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
