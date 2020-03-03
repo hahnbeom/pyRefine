@@ -1,18 +1,30 @@
 import os,sys
 import numpy as np
 
-#SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
-#sys.path.insert(0,SCRIPTDIR+'../Critics')
-sys.path.insert(0,'/home/hpark/NextGenSampler/pyrosetta/Critics')
+SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0,SCRIPTDIR+'/../Critics')
+print (sys.path)
+#sys.path.insert(0,'/home/hpark/NextGenSampler/pyrosetta/Critics')
 import tensorflow as tf
 import CenQRunner
 
 class Scorer:
-    def __init__(self,opt):
+    def __init__(self,opt,cuts=[]):
         self.scoretype = opt.scoretype
         
         if self.scoretype == 'Q':
-            self.cenQscorer = CenQRunner.Scorer()
+            if opt.dist != None:
+                self.cenQscorer = CenQRunner.Scorer()
+                self.dist_in = np.load(opt.dist)['dist'].astype(np.float32)
+            else:
+                self.cenQscorer = CenQRunner.Scorer(ver=0)
+                self.dist_in = None
+            #
+            # ignore neighboring residues to cut position
+            chain_breaks = list()
+            for res in cuts[:-1]: # final cut position = C-terminal
+                chain_breaks.extend([res, res+1])
+            self.chain_breaks = chain_breaks
             
         else:
             sfxn = PR.create_score_function("score3")
@@ -78,7 +90,7 @@ class Scorer:
 
     def score(self,poses):
         if self.scoretype == "Q":
-            CenQ_s = self.cenQscorer.score(poses)
+            CenQ_s = self.cenQscorer.score(poses, dist=self.dist_in, res_ignore=self.chain_breaks)
             #return CenQ_s
             # estimated residue-wise lddts
             CenQ_G = np.mean(CenQ_s,axis=1)
