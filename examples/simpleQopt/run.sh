@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #extra=$1
-extra=" -ulr 10-17 32-45"
+extra=" -ulr 10-17 32-40"
 
 python ~/NextGenSampler/pyrosetta/Rosetta/test_pyRefineQ.py \
        -s init.pdb \

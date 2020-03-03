@@ -376,3 +376,39 @@ def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False)
         pose.set_omega(resno,180.0)
         
     return pose
+
+def R2quat( R ): #input: Rosetta numeric.xyzMatrix
+    if R.xx > R.yy and R.xx > R.zz:
+        S = np.sqrt( 1.0 + R.xx - R.yy - R.zz ) * 2.0
+        Q = np.array([R.zy-R.yz, 0.25*S*S, R.xy+R.yx, R.zx+R.xz])/S
+    elif R.yy > R.zz:
+        S = np.sqrt( 1.0 + R.yy - R.xx - R.zz ) * 2.0
+        Q = np.array([R.xz-R.zx, R.xy+R.yx, 0.25*S*S, R.zy+R.yz])/S
+    else:
+        S = np.sqrt( 1.0 + R.zz - R.xx - R.yy ) * 2.0
+        Q = np.array([R.yx-R.xy, R.xz+R.zx, R.zy+R.yz, 0.25*S*S])/S
+    return Q
+
+def quat2R( Q ): #output: Rosetta numeric.xyzMatrix
+    Rnew = rosetta.numeric.xyzMatrix_double_t()
+    Rnew.xx=1.0-2.0*(Q[2]*Q[2]+Q[3]*Q[3])
+    Rnew.xy=    2.0*(Q[1]*Q[2]-Q[3]*Q[0])
+    Rnew.xz=    2.0*(Q[1]*Q[3]+Q[2]*Q[0])
+    Rnew.yx=    2.0*(Q[1]*Q[2]+Q[3]*Q[0])
+    Rnew.yy=1.0-2.0*(Q[1]*Q[1]+Q[3]*Q[3])
+    Rnew.yz=    2.0*(Q[2]*Q[3]-Q[1]*Q[0])
+    Rnew.zx=    2.0*(Q[1]*Q[3]-Q[2]*Q[0])
+    Rnew.zy=    2.0*(Q[2]*Q[3]+Q[1]*Q[0])
+    Rnew.zz=1.0-2.0*(Q[1]*Q[1]+Q[2]*Q[2])
+    print(Rnew)
+    return Rnew
+    
+def Qmul(Q1,Q2):
+    Q = np.zeros(4)
+    Q[0] = Q2[0] * Q1[0] - Q2[1] * Q1[1] - Q2[2] * Q1[2] - Q2[3] * Q1[3]
+    Q[1] = Q2[0] * Q1[1] + Q2[1] * Q1[0] + Q2[2] * Q1[3] - Q2[3] * Q1[2]
+    Q[2] = Q2[0] * Q1[2] - Q2[1] * Q1[3] + Q2[2] * Q1[0] + Q2[3] * Q1[1]
+    Q[3] = Q2[0] * Q1[3] + Q2[1] * Q1[2] - Q2[2] * Q1[1] + Q2[3] * Q1[0]
+    Q /= np.sqrt(np.dot(Q,Q))
+    return Q
+    

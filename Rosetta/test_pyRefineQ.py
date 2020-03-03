@@ -680,10 +680,10 @@ class Runner:
                                         name ="FragBig")
 
         # turn-off jumper til debugged
-        #jumps_to_sample = [1,4] #0-index
-        '''jumper   = SO.JumpSampler([jumpancs[i] for i in jumps_to_sample],
+        jumps_to_sample = [1] #0-index
+        jumper   = SO.JumpSampler([jumpancs[i] for i in jumps_to_sample],
                                   maxtrans=1.5,maxrot=10.0,
-                                  name="Jump") #HACK'''
+                                  name="Jump") #HACK
 
         # minmover for jump only -- unused
         sf = PR.create_score_function("score4_smooth")
@@ -693,8 +693,8 @@ class Runner:
         #minimize only relevant DOF to make minimizer faster
         for i,p in enumerate(residue_weights):
             if p > 1.0: mmap.set_bb(i+1,True)
-        #for jumpno in jumps_to_sample:
-        #    mmap.set_jump(jumpno+1,True)
+        for jumpno in jumps_to_sample:
+            mmap.set_jump(jumpno+1,True)
         
         jump_minimizer = PR.rosetta.protocols.minimization_packing.MinMover(mmap, sf, 'lbfgs_armijo_nonmonotone', 0.0001, True) 
         jump_minimizer.max_iter(5)
@@ -702,14 +702,13 @@ class Runner:
         ## Coarse-grained sampling stage
         #perturb initially
         sampler_p.apply(pose)
-        #jumper.apply(pose) 
+        jumper.apply(pose) 
         Emin = scorer.score([pose])[0]
         print("Einit ",Emin)
         pose.dump_pdb("ipert.pdb")
         pose_min = pose
 
-        #moves = [jumper]
-        moves = [sampler_s,sampler_b]
+        moves = [jumper]
         weights = [] #[1.0,0.5] #uniform is unspecified
         for it in range(50):
             pose_in = pose_min

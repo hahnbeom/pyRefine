@@ -252,22 +252,34 @@ class JumpSampler:
         jumpid = pose.fold_tree().get_jump_that_builds_residue( ancres )
         jump = pose.jump( jumpid )
 
+        ## simpler way: is this good enough -- NEVER USE THIS
         ## direction: 1 or -1 -- meaning?
-        direction = 1
-        if random.random() < 0.5: direction = -1
-        #simpler way: is this good enough
-        jump.gaussian_move( direction, self.maxtrans, self.maxrot )
+        #direction=1
+        #jump.gaussian_move( direction, self.maxtrans, self.maxrot )
 
-        '''
-        # explicit calling
-        # rotation
-        R = rosetta.numeric.xyzMatrix()
-        jump.set_rotation( R )
+        ## direct control over T & R
+        T = jump.get_translation()
+        Q = rosetta_utils.R2quat( jump.get_rotation() )
 
-        # translation
-        tv = maxtrans*random.random()
-        jump.random_trans( tv )
-        '''
+        # random axis for now... may revisit later conditioning on SS type
+        axis = np.random.rand(3)
+        axis /= np.sqrt(np.dot(axis,axis))
+        
+        ang_in_rad = self.maxrot*random.random()*np.pi/180.0
+        sa = np.sin(ang_in_rad)
+        
+        Qrot = [np.cos(ang_in_rad), sa*axis[0], sa*axis[1], sa*axis[2]]
+        Qnew = rosetta_utils.Qmul( Q, Qrot )
+        Rnew = rosetta_utils.quat2R( Qnew )
+
+        Tnew = T
+        for k in range(3):
+            T[k] += dv*(1.0-2.0*random.random())
+
+        
+        jump.set_translation( Tnew );
+        jump.set_rotation( Rnew );
+        
         pose.set_jump( jumpid, jump )
 
     def accept(self,pose,pose0):
