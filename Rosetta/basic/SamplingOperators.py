@@ -262,7 +262,7 @@ class JumpSampler:
         Q = rosetta_utils.R2quat( jump.get_rotation() )
 
         # random axis for now... may revisit later conditioning on SS type
-        axis = np.random.rand(3)
+        axis = np.random.rand(3)-0.5 #so that ranges within -0.5 to +0.5
         axis /= np.sqrt(np.dot(axis,axis))
         
         ang_in_rad = self.maxrot*random.random()*np.pi/180.0
@@ -274,7 +274,7 @@ class JumpSampler:
 
         Tnew = T
         for k in range(3):
-            T[k] += dv*(1.0-2.0*random.random())
+            T[k] += self.maxtrans*(1.0-2.0*random.random())
 
         
         jump.set_translation( Tnew );

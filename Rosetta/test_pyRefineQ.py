@@ -95,7 +95,7 @@ def arg_parser(argv):
                      help='Mute all [turn off]')
 
     ## Scoring options
-    opt.add_argument('-score', dest='scoretype', metavar="SCORE", default="score3",\
+    opt.add_argument('-score', dest='scoretype', metavar="SCORE", default="default",\
                      help='centroid Score type')
     opt.add_argument('-cen_cst', dest='cen_cst', default=None, help='centroid restraint file')
     opt.add_argument('-fa_cst', dest='fa_cst', default=None, help='fullatom restraint file')
@@ -419,7 +419,7 @@ def FoldTreeSample(pose,opt,FTInfo,
     
     return pose, scorer.score(pose)
 
-
+##### simple function using GPU 
 def branch_and_select_1step(pose_in,samplers,scorer,n,
                             weights=[], #sampler weights
                             minimizer=None,
@@ -443,10 +443,15 @@ def branch_and_select_1step(pose_in,samplers,scorer,n,
 
     scores = scorer.score(poses)
     time2 = time.time()
-    
+
+    imin = np.argmin(scores)
     print("Elapsed time, pert(min)/score: %.1f %.1f"%(time1-time0,time2-time1))
     print(" %6.4f"*len(scores)%tuple(scores))
-    return poses[np.argmin(scores)], min(scores)
+
+    Ecomp_min = scorer.by_component[imin]
+    print("Emin component: "+' '.join(["%s %8.3f"%(key,Ecomp_min[key]) for key in Ecomp_min]))
+    
+    return poses[imin], min(scores)
 
 # writing PDB 
 def report_pose(pose,tag,extra_score,outsilent,mute=False):
@@ -656,8 +661,9 @@ class Runner:
         jumpancs, cuts = simple_ft_setup(pose,self.opt.ulrs)
         print("JUMP ANCS: ", jumpancs)
 
-        self.opt.scoretype = "Q"
-        scorer = Scorer(self.opt, cuts)
+        if self.opt.scoretype == "default":
+            self.opt.scoretype = "Q"
+        scorer = Scorer(self.opt, cuts, normf=1.0/nres)
         residue_weights = np.array([0.1 for k in range(nres)])
         residue_weights_p = np.array([0.0 for k in range(nres)])
 
@@ -702,14 +708,16 @@ class Runner:
 
         ## Coarse-grained sampling stage
         #perturb initially
-        sampler_p.apply(pose)
-        jumper.apply(pose) 
+        for k in range(10):
+            sampler_p.apply(pose)
+            jumper.apply(pose)
+        
         Emin = scorer.score([pose])[0]
         print("Einit ",Emin)
         pose.dump_pdb("ipert.pdb")
         pose_min = pose
 
-        moves = [jumper]
+        moves = [jumper,sampler_b]
         weights = [] #[1.0,0.5] #uniform is unspecified
         for it in range(50):
             pose_in = pose_min

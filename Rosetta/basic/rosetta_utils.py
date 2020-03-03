@@ -400,7 +400,6 @@ def quat2R( Q ): #output: Rosetta numeric.xyzMatrix
     Rnew.zx=    2.0*(Q[1]*Q[3]-Q[2]*Q[0])
     Rnew.zy=    2.0*(Q[2]*Q[3]+Q[1]*Q[0])
     Rnew.zz=1.0-2.0*(Q[1]*Q[1]+Q[2]*Q[2])
-    print(Rnew)
     return Rnew
     
 def Qmul(Q1,Q2):

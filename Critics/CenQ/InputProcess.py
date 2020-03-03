@@ -6,7 +6,7 @@ import time
 import numpy as np
 import scipy.spatial
 import tensorflow as tf
-print (tf.test.gpu_device_name())
+#print (tf.test.gpu_device_name())
 from itertools import zip_longest
 from .Sequence import *
 
@@ -138,7 +138,6 @@ class InputGenerator:
             self.inputs['aa_prop'] = np.concatenate((self.inputs['seq1hot'], self.inputs['blosum'],\
                                                      self.inputs['relpos'][:,None], self.inputs['meiler']), axis=-1)
         n_res = len(self.inputs['seq1hot'])
-        print ("Sequence inputs: %.3f"%(time.time() - start_time))
         #
         atypes = np.full((n_res, 5), -1, dtype=np.int8)
         seq_in_number = self.inputs['msa'][0]
@@ -169,7 +168,6 @@ class InputGenerator:
                         C[i_p, i-1, k] = C_xyz[k]
                         O[i_p, i-1, k] = O_xyz[k]
                         CB[i_p, i-1, k] = CB_xyz[k]
-        print ("Get coordinates: %.3f"%(time.time() - start_time))
         #
         # Input for CenQ estimation
         # Input:
@@ -186,8 +184,6 @@ class InputGenerator:
             n_batch = n_prot // prot_in_batch
         else:
             n_batch = n_prot // prot_in_batch + 1
-        print ("Check: ", prot_in_batch, n_batch)
-        print ("Input process: %.3f"%(time.time() - start_time))
        
         for i_b in range(n_batch):
             start = i_b*prot_in_batch
@@ -195,6 +191,5 @@ class InputGenerator:
             #
             batch = [N[start:end], CA[start:end], C[start:end], O[start:end], CB[start:end]]
             batch_s.append(batch)
-        print ("Input process: %.3f"%(time.time() - start_time))
         
         return self.inputs['aa_prop'], self.inputs['seqsep'], atypes, batch_s

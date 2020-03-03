@@ -7,43 +7,71 @@ print (sys.path)
 #sys.path.insert(0,'/home/hpark/NextGenSampler/pyrosetta/Critics')
 import tensorflow as tf
 import CenQRunner
+import pyrosetta as PR
 
 class Scorer:
-    def __init__(self,opt,cuts=[]):
+    def __init__(self,opt,cuts=[],normf=1.0):
         self.scoretype = opt.scoretype
-        
-        if self.scoretype == 'Q':
+        self.kT_mulfactor = 1.0 #??
+
+        self.wts = {}
+        self.sfxn = None
+        if self.scoretype.endswith(".wts"):
+            self.init_from_wts_file(normf=normf)
+        elif self.scoretype == 'Q': #Q-only
+            self.wts['Q'] = 1.0
+        else:
+            self.init_from_wts_file(normf=normf)
+        print("SETUP Scorer, weights: ", self.wts)
+
+        if 'Q' in self.wts:
             if opt.dist != None:
                 self.cenQscorer = CenQRunner.Scorer()
                 self.dist_in = np.load(opt.dist)['dist'].astype(np.float32)
             else:
                 self.cenQscorer = CenQRunner.Scorer(ver=0)
                 self.dist_in = None
-            #
             # ignore neighboring residues to cut position
             chain_breaks = list()
             for res in cuts[:-1]: # final cut position = C-terminal
                 chain_breaks.extend([res, res+1])
             self.chain_breaks = chain_breaks
-            
-        else:
-            sfxn = PR.create_score_function("score3")
-            sfxn.set_weight(PR.rosetta.core.scoring.cen_hb, 5.0)
+
+        if 'dssp' in self.wts:
             self.Edssp = 1e6
             self.wdssp = 5.0
-            self.kT_mulfactor = 1.0
-            self.sfxn = sfxn
             self.ss8 = []
             if opt.ss_fn != None:
-                self.ss8 = np.load(opt.ss_fn)
+                self.ss8 = np.load(opt.ss_fn)['ss9']
                 # corrections to termini
                 self.ss8[0, :] = 1.0 / 8.0
                 self.ss8[-1, :] = 1.0 / 8.0
                 self.ss3 = np.zeros((len(self.ss8),3))
+                #(0: B, 1: E, 2: U, 3: G, 4: H, 5: I, 6: S, 7: T, 8: C) 
                 #BEGHIST_: H 2,3,4; E 0,1; L 5,6,7
-                self.ss3[:,0] = np.sum([self.ss8[:,2],self.ss8[:,3],self.ss8[:,4]],axis=0)
-                self.ss3[:,1] = np.sum([self.ss8[:,0],self.ss8[:,1]],axis=0)
-                self.ss3[:,2] = np.sum([self.ss8[:,5],self.ss8[:,6],self.ss8[:,6]],axis=0)
+                self.ss3[:,0] = np.sum([self.ss8[:,3],self.ss8[:,4],self.ss8[:,5]],axis=0) #H
+                self.ss3[:,1] = np.sum([self.ss8[:,0],self.ss8[:,1],self.ss8[:,2]],axis=0) #E
+                self.ss3[:,2] = np.sum([self.ss8[:,6],self.ss8[:,7],self.ss8[:,8]],axis=0) #C
+
+    def init_from_wts_file(self,normf=1.0):
+        self.wts['rosetta'] = 1.0*normf
+        
+        if self.scoretype == "default":
+            self.sfxn = PR.create_score_function("score4_smooth")
+            return
+
+        self.sfxn = PR.create_score_function("empty")
+        for l in open(self.scoretype):
+            words = l[:-1].split()
+            scoretype = words[0]
+            wts = float(words[1])
+            if scoretype == "Q":
+                self.wts['Q'] = wts
+            elif scoretype == "dssp":
+                self.wts['dssp'] = wts*normf
+            elif not scoretype.startswith("#"):
+                st = PR.rosetta.core.scoring.score_type_from_name(scoretype)
+                self.sfxn.set_weight(st, wts)
             
     def calc_dssp_agreement_score(self,pose,res_s):
         dssp = PR.rosetta.core.scoring.dssp.Dssp(pose)
@@ -89,21 +117,25 @@ class Scorer:
         return self.kT0*self.kT_mulfactor
 
     def score(self,poses):
-        if self.scoretype == "Q":
+        Es = np.zeros(len(poses))
+        self.by_component = [{} for pose in poses] #cached every call
+        
+        if "Q" in self.wts:
             CenQ_s = self.cenQscorer.score(poses, dist=self.dist_in, res_ignore=self.chain_breaks)
-            #return CenQ_s
-            # estimated residue-wise lddts
-            CenQ_G = np.mean(CenQ_s,axis=1)
-            return -CenQ_G #make it as "Energy"
+            Es -= self.wts["Q"]*np.mean(CenQ_s,axis=1) # estimated residue-wise lddts
 
-        else:
-            for pose in poses:
-                self.Edssp = 0.0
-                self.E = self.sfxn.score(pose)
-                if self.ss8 != []:
-                    #for res in range(pose.size()):
-                    #TODO: score only ulr? 
-                    self.Edssp += self.calc_dssp_agreement_score(pose,range(1,pose.size()))
-                E = self.E + self.Edssp
-                Es.append(E)
+            for i,CenQ in enumerate(CenQ_s):
+                self.by_component[i]['Q'] = -self.wts["Q"]*np.mean(CenQ) #better keep as perres?
+            
+        for i,pose in enumerate(poses):
+            if "dssp" in self.wts and self.ss8 != []:
+                dsspscore = self.calc_dssp_agreement_score(pose,range(1,pose.size()))
+                Es[i] += self.wts["dssp"]*dsspscore
+                self.by_component[i]['dssp'] = self.wts["dssp"]*dsspscore
+                
+            if "rosetta" in self.wts:
+                rosetta_score = self.sfxn.score(pose)
+                Es[i] += self.wts["rosetta"]*rosetta_score
+                self.by_component[i]['rosetta'] = self.wts["rosetta"]*rosetta_score
+            
         return Es
