@@ -53,7 +53,7 @@ def simple_ft_setup(pose,ulrs):
         pose.set_psi(res, 135.0)
         pose.set_omega(res, 180.0)
 
-    return [jump[1] for jump in jumpdef]
+    return [jump[1] for jump in jumpdef], cuts
 
 def arg_parser(argv):
     import argparse
@@ -102,6 +102,7 @@ def arg_parser(argv):
     opt.add_argument('-cen_cst_w', dest='cen_cst_w', type=float, default=1.0, help='')
     opt.add_argument('-fa_cst_w', dest='fa_cst_w', type=float, default=1.0, help='')
     opt.add_argument('-refcorrection_method', dest='refcorrection_method', default="none", help='')
+    opt.add_argument('-dist', dest='dist', default=None, help='Outcome of trRosetta in npz format which contains predicted distogram. It should be provided if you use Q as score')
     
     ###### Sampling options
     ### relative weights
@@ -652,11 +653,11 @@ class Runner:
         
         # Repeat Centroid-MC nsample_cen times
         pose = pose0.clone()
-        jumpancs = simple_ft_setup(pose,self.opt.ulrs)
+        jumpancs, cuts = simple_ft_setup(pose,self.opt.ulrs)
         print("JUMP ANCS: ", jumpancs)
 
         self.opt.scoretype = "Q"
-        scorer = Scorer(self.opt)
+        scorer = Scorer(self.opt, cuts)
         residue_weights = np.array([0.1 for k in range(nres)])
         residue_weights_p = np.array([0.0 for k in range(nres)])
 
@@ -677,7 +678,7 @@ class Runner:
         sampler_b = SO.FragmentInserter(self.opt,self.opt.fragbig,residue_weights,
                                         name ="FragBig") 
         sampler_s = SO.FragmentInserter(self.opt,self.opt.fragsmall,residue_weights,
-                                        name ="FragBig")
+                                        name ="FragSmall")
 
         # turn-off jumper til debugged
         jumps_to_sample = [1] #0-index

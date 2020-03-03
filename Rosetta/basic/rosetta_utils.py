@@ -412,3 +412,21 @@ def Qmul(Q1,Q2):
     Q /= np.sqrt(np.dot(Q,Q))
     return Q
     
+def reset_fold_tree(pose, nres, saved_ft):
+    pose.conformation().delete_residue_range_slow(nres+1, pose.size())
+    pose.conformation().fold_tree(saved_ft)
+
+    from pyrosetta.rosetta.core.chemical import CUTPOINT_LOWER, CUTPOINT_UPPER
+    for i in range(1, pose.size()+1):
+        if pose.residue(i).has_variant_type(CUTPOINT_LOWER):
+            is_cut = False
+            for ic in range(1, pose.fold_tree().num_cutpoint()+1):
+                cutpoint = pose.fold_tree().cutpoint(ic)
+                if i == cutpoint:
+                    is_cut = True
+                    break
+            if not is_cut:
+                pose_changed = True
+                rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_LOWER, i)
+                if pose.residue(i+1).has_variant_type(CUTPOINT_UPPER):
+                    rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_UPPER, i+1)
