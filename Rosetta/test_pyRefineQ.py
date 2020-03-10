@@ -268,9 +268,8 @@ def get_samplers(pose,opt,FTInfo=None):
     residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
 
     # get list of jumps to sample
-    jumps_to_sample = []
-    for i,jump in  enumerate(FTInfo.jumps):
-        print("jump to sample: ", i, jump.is_ULR)
+    jumps_to_sample = [i for i,jump in enumerate(FTInfo.jumps) if jump.movable]
+    print("Jumps to sample",  jumps_to_sample)
     
     # Sampler
     if opt.mover_weights[0] > 1.0e-6:
@@ -778,7 +777,7 @@ class Runner:
                 Emin = Ebest
 
         if dump_pdb:
-            pose.dump_pdb(self.opt.prefix+".final.pdb")
+            pose_min.dump_pdb(self.opt.prefix+".final.pdb")
         return pose_min
     
 if __name__ == "__main__":
