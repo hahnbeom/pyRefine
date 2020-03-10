@@ -1,6 +1,9 @@
 import sys,os,copy
-from math import sqrt
 import numpy as np
+
+###
+def ShannonEntropy(Ps):
+    return -np.sum([P*np.log(P) for P in Ps])
 
 ###### simple math to replace someday....
 def normalize(v1):
@@ -12,7 +15,7 @@ def normalize(v1):
 
 def distance(crd1,crd2):
     dcrd = [crd1[k]-crd2[k] for k in range(3)]
-    return sqrt(dcrd[0]*dcrd[0] + dcrd[1]*dcrd[1] + dcrd[2]*dcrd[2])
+    return np.sqrt(dcrd[0]*dcrd[0] + dcrd[1]*dcrd[1] + dcrd[2]*dcrd[2])
 
 def d2(mol1crd,mol2crd):
     displ=[]
@@ -27,7 +30,6 @@ def cross(v1,v2):
     rturn [v1[1]*v2[2]-v1[2]*v2[1],v1[2]*v2[0]-v1[0]*v2[2],v1[0]*v2[1]-v1[1]*v2[0]]
 
 ####### PDB parser
-        
 def pdb_in_resrange(pdb,newname,resrange,skip_alt=True,exres=False):
     cont = open(pdb)
     newpdb = open(newname,'w')
@@ -144,6 +146,27 @@ def read_d0mtrx(pdb,nres=-1,byresno=False):
     return d0mtrx
 
 
+def write_as_pdb(outf,crds,chainno=[]):
+    out= open(outf,'w')
+    l = "ATOM     %2d  %-2s  UNK %s  %2d    %8.3f%8.3f%8.3f  1.00  0.00           %s\n"
+    j = 0
+    for i,crd in enumerate(crds):
+        chain = 'A'
+        if len(chainno) == len(crds):
+            chain = 'ABCDEFGHIJKLMNOPQ'[chainno[i]]
+        
+        if len(crd) == 3:
+            out.write(l%(j,"CA",chain,i,crds[i][0],crds[i][1],crds[i][2],'C'))
+            j += 1
+        else:
+            out.write(l%(j  ,"N", chain,i,crds[i][0][0],crds[i][0][1],crds[i][0][2],'N'))
+            out.write(l%(j+1,"CA",chain,i,crds[i][1][0],crds[i][1][1],crds[i][1][2],'C'))
+            out.write(l%(j+2,"C" ,chain,i,crds[i][2][0],crds[i][2][1],crds[i][2][2],'C'))
+            out.write(l%(j+3,"O" ,chain,i,crds[i][3][0],crds[i][3][1],crds[i][3][2],'O'))
+            #out.write(l%(j+4,"CB" ,i,crds[i][4][0],crds[i][4][1],crds[i][4][2],'C'))
+            j+=4
+    out.close()
+
 ######################################
 # ULR
 def list2part(inlist):
@@ -221,8 +244,7 @@ def sandwich(inlist,super_val,infer_val):
         if inlist_cp[i-1] == infer_val and inlist_cp[i+1] == infer_val:
             inlist[i] = infer_val
 
-########## external stuffs
-
+########## external stuffs -- also may be removed
 def SS_fromdssp(pdbfile,log=''):
     if log == '':
         cont = os.popen('/home/hpark/util/dsspcmbi -na %s 2> /dev/null'%pdbfile).readlines()
@@ -333,27 +355,6 @@ def betainfo_fromdssp(pdbfile,min_strand_len=0):
                     pairings.append([i,j])
     #return strands, strand_npaired, pairings
     return strands, coils, paired_res, pairings
-
-def write_as_pdb(outf,crds,chainno=[]):
-    out= open(outf,'w')
-    l = "ATOM     %2d  %-2s  UNK %s  %2d    %8.3f%8.3f%8.3f  1.00  0.00           %s\n"
-    j = 0
-    for i,crd in enumerate(crds):
-        chain = 'A'
-        if len(chainno) == len(crds):
-            chain = 'ABCDEFGHIJKLMNOPQ'[chainno[i]]
-        
-        if len(crd) == 3:
-            out.write(l%(j,"CA",chain,i,crds[i][0],crds[i][1],crds[i][2],'C'))
-            j += 1
-        else:
-            out.write(l%(j  ,"N", chain,i,crds[i][0][0],crds[i][0][1],crds[i][0][2],'N'))
-            out.write(l%(j+1,"CA",chain,i,crds[i][1][0],crds[i][1][1],crds[i][1][2],'C'))
-            out.write(l%(j+2,"C" ,chain,i,crds[i][2][0],crds[i][2][1],crds[i][2][2],'C'))
-            out.write(l%(j+3,"O" ,chain,i,crds[i][3][0],crds[i][3][1],crds[i][3][2],'O'))
-            #out.write(l%(j+4,"CB" ,i,crds[i][4][0],crds[i][4][1],crds[i][4][2],'C'))
-            j+=4
-    out.close()
 
 def blosum62(res1,res2):
     aaid = ['A','R','N','D','Q','C','E','G','H','I',

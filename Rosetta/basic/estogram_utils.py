@@ -3,7 +3,6 @@ import copy
 import numpy as np
 import scipy as sp
 import pyrosetta as PR
-from FoldTreeInfo import FoldTreeInfo
 import types
 
 SCRIPTDIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +46,12 @@ def arg_parser(argv):
                         default=0.5,
                         help="threshold for confidence [0~1], default:0.5")
 
+    '''parser.add_argument("--min_coverage",
+                        action="store",
+                        type=float,
+                        default=0.0, #by default always converge
+                        help="Dynamically assign until this coverage")'''
+    
     parser.add_argument("--subdef_density",
                         "-d", action="store",
                         type=float,
@@ -133,19 +138,17 @@ def estogram2ulr(estogram,opt):
         Qres_soft[i] /= n
 
     # 2. return either binary ULR pred or max-possible-deviation
-    if opt.ulrmode == 'dynamic':
-        ulrres = pred_ULR(Qlr,Qres_soft,dynamic=True)
-    else:
-        ulrres = pred_ULR(Qlr,Qres_soft,
-                        fmin=opt.ulr_fmin,
-                        fmax=opt.ulr_fmax)
+    #if opt.ulrmode == 'dynamic':
+    ulrres_aggr = pred_ULR(Qlr,Qres_soft,dynamic=True)
+    ulrres_cons = pred_ULR(Qlr,Qres_soft,fmin=opt.ulr_fmin,fmax=opt.ulr_fmax)
 
     ##split to regions
     # currently only two options...
-    ulrs = myutils.list2part(ulrres)
+    ulrs_aggr = myutils.list2part(ulrres_aggr)
+    ulrs_cons = myutils.list2part(ulrres_cons)
     
     # translate to max dev in Angstrom
-    return ulrs, Qres_soft
+    return ulrs_aggr, ulrs_cons, Qres_soft
 
 def pred_ULR(Q,Qres_soft,fmin=0.15,fmax=0.25,dynamic=False):        
     if dynamic: #make it aggressive!
@@ -365,14 +368,14 @@ def find_blocks2(g, vs=None, visualize=False, th=0.8):
         outputs.append(subgraph_vs)
     return outputs
 
-def estogram2sub(estogram,SS3,ulrs,opt,confcut=-1):
+def estogram2sub(estogram,SS3,ulrs,opt):
     x = estogram ##just alias
     x = (x+np.transpose(x, [1,0,2]))/2
     b = binrize_estogram(x, exclude=ulrs, threshold = opt.subdef_conserve)
     nres = len(x)
     MINCONFCUT = 0.5 #lower confidence threshold until this value
 
-    if contcut == -1: confcut = opt.subdef_confidence
+    confcut = opt.subdef_confidence
     ncover_min = int(opt.min_coverage*nres)
     covered = [False for k in range(nres)]
 
@@ -438,7 +441,6 @@ def estogram2sub(estogram,SS3,ulrs,opt,confcut=-1):
             for j,chunk in enumerate(subdef):
                 f.write("Chunk %d: "%j+" %d-%d\n"%(chunk[0],chunk[-1]))
         f.close()
-
     return subdefs
 
 # Use this main function for short CAdev/ULR analysis...

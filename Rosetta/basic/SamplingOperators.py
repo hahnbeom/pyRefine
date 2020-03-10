@@ -8,11 +8,20 @@ class SamplingMaster:
         self.name = name
         self.operators = operators
         self.probs = probs
+        self.minimizer = None
+        self.minimize = False
 
     def apply(self,pose):
         op_sel = random.choices(self.operators,self.probs)[0]
         op_sel.apply(pose)
+        if self.minimize:
+            self.mimizer.apply(pose)
         return op_sel.name
+
+    def show(self):
+        for op in self.operators:
+            if hasattr(op,"show") and op.history_count != []:
+                op.show()
 
 class FragmentInserter:
     def __init__(self,opt,fragf,#alned_res,disallowed_res, ###unify to residue_weights!
@@ -70,7 +79,7 @@ class FragmentInserter:
         l = ''
         for i,val in enumerate(self.history_count):
             if val > 0: l += ' %d:%d;'%(i+1,val)
-        print("Insertion sites:", l)
+        print("%s: insertion sites:"%self.name, l)
         
 class Chunk:
     def __init__(self, chunk_id=-1, threadable=False):
@@ -80,6 +89,7 @@ class Chunk:
         self.pos = None
         self.valid = True
         self.threadable = threadable
+        self.history_count = []
         
     def read_chunk_info(self, line): ##supplemental
         x = line.split()
@@ -115,6 +125,7 @@ class ChunkReplacer:
         self.min_chunk_len = opt.min_chunk_len
         self.chunk_picked = None
         self.name = "ChunkReplacer"
+        self.history_count = []
 
     def possible(self):
         return (len(self.chunklib) > 0)
@@ -244,6 +255,7 @@ class JumpSampler:
         self.name = name
         self.maxtrans = maxtrans
         self.maxrot = maxrot
+        self.history_count = []
 
     def apply(self,pose):
         njumps_movable = len(self.anchors)

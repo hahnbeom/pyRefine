@@ -9,7 +9,9 @@ SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0,SCRIPTDIR+'/basic')
 import SamplingOperators as SO
 import rosetta_utils
-import estogram2cst 
+import estogram2cst
+from FoldTreeInfo import FoldTreeInfo
+import config
 
 # initialize pyRosetta
 #should be initialized in main
@@ -73,6 +75,9 @@ def arg_parser(argv):
                      help="TERM chunk search result file")
     opt.add_argument('-native', dest='native', default=None, help='Input ref file')
     opt.add_argument('-npz', dest='npz', default=None, help='Outcome of DeepAccNet in npz format')
+    opt.add_argument('-FT', dest='fts', default=[], nargs="+",
+                     help='FoldTree definitions')
+ 
     
     ## Output
     opt.add_argument('-prefix', dest='prefix', default="S", \
@@ -105,6 +110,11 @@ def arg_parser(argv):
     opt.add_argument('-dist', dest='dist', default=None, help='Outcome of trRosetta in npz format which contains predicted distogram. It should be provided if you use Q as score')
     
     ###### Sampling options
+    ### Scheduling
+    opt.add_argument('-nstep_anneal', type=int, default=20,
+                     help='num. steps for each AnnealQ runs')
+    opt.add_argument('-nmacro', type=int, default=1,
+                     help='num. steps for macro cycles')
     ### relative weights
     opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[1.0,0.0,0.0], #fraginsert only
                      help="weights on movers [frag-insert/jump-opt/motif-insert]")
@@ -170,6 +180,7 @@ def arg_parser(argv):
             argv.remove(arg)
 
     params = opt.parse_args(argv)
+    params.config = config.CONFIGS
     
     # post-process
     params.subs = []
@@ -193,7 +204,8 @@ def arg_parser(argv):
 def check_opt_consistency(opt):
     return True
 
-def get_residue_weights_from_opt(opt,FTInfo,nres,nmer):
+def get_residue_weights(opt,FTInfo,nres,nmer):
+    disallowed = [] #FTInfo.cuts
     if not opt.verbose:
         print( "Fragment insertion disallowed: "+" %d"*len(disallowed)%tuple(disallowed))
 
@@ -210,12 +222,17 @@ def get_residue_weights_from_opt(opt,FTInfo,nres,nmer):
                 residue_weights[resno-1] = float(words[1])
             return residue_weights
         
-        ## TODO
         # 2. Using MinkTors
-        #elif opt.tors_npz:
+        elif FTInfo.Qtors != [] and len(FTInfo.Qtors) == nres:
+            print("Define residue weights from predicted torsion quality...")
+            #log scale of CAdev, 1.0 at ULR, aligned_frag_w at core
+            residue_weights = 1.0-FTInfo.Qtors
+            residue_weights += -min(FTInfo.Qtors) + opt.aligned_frag_w 
+            return residue_weights
 
         # 3rd. from CAdev estimation
         elif FTInfo.CAdev != []:
+            print("Define residue weights from predicted CA deviation...")
             residue_weights = np.log(FTInfo.CAdev/100.0+1.0) + opt.aligned_frag_w #log scale of CAdev, 1.0 at ULR, aligned_frag_w at core
             return residue_weights
         
@@ -247,12 +264,18 @@ def get_samplers(pose,opt,FTInfo=None):
 
     nres = pose.size()-1
     
+    residue_weights_big = get_residue_weights(opt,FTInfo,nres,9)
+    residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
+
+    # get list of jumps to sample
+    jumps_to_sample = []
+    for i,jump in  enumerate(FTInfo.jumps):
+        print("jump to sample: ", i, jump.is_ULR)
+    
+    # Sampler
     if opt.mover_weights[0] > 1.0e-6:
         w = opt.mover_weights[0]
 
-        residue_weights_big = get_residue_weights(opt,FTInfo,nres,9)
-        residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
-            
         # Mutation operator for initial perturbation
         mutOperator0 = SO.FragmentInserter(opt_cons,opt.fragbig,residue_weights_big,
                                            name="FragBigULR")
@@ -270,8 +293,8 @@ def get_samplers(pose,opt,FTInfo=None):
 
         pert_units += [mutOperator0]
         pert_w += [w]
-        main_units += [mutOperator1, mutOperator2, chunkOperator]
-        main_w += [w*opt.p_mut_big, w*opt.p_mut_small, w*opt.p_chunk]
+        main_units += [mutOperator1, mutOperator2] #, chunkOperator]
+        main_w += [w*opt.p_mut_big, w*opt.p_mut_small] #, w*opt.p_chunk]
         refine_units += [mutOperator2]
         refine_w += [w]
         print("Make Fragment sampler with weight %.3f..."%w)
@@ -297,6 +320,22 @@ def get_samplers(pose,opt,FTInfo=None):
     mainmover = SO.SamplingMaster(opt,main_units,main_w,"main") #probability
     refiner = SO.SamplingMaster(opt,refine_units,refine_w,"refiner")
 
+    # MinMover
+    sf = PR.create_score_function("score4_smooth")
+    mmap = PR.MoveMap()
+    mmap.set_bb(False)
+    mmap.set_jump(False)
+    #minimize only relevant DOF to make minimizer faster
+    for i,p in enumerate(residue_weights_small):
+        if p > 1.0: mmap.set_bb(i+1,True)
+    for jumpno in jumps_to_sample:
+        mmap.set_jump(jumpno+1,True)
+        
+    minimizer = PR.rosetta.protocols.minimization_packing.MinMover(mmap, sf, 'lbfgs_armijo_nonmonotone', 0.0001, True) 
+    minimizer.max_iter(5)
+    mainmover.minimizer = minimizer
+    refiner.minimizer = minimizer
+    
     return perturber, mainmover, refiner
 
 # One step of MC in FT hybridize
@@ -375,7 +414,7 @@ def FoldTreeSample(pose,opt,FTInfo,
     ## 2. Sampling operators
     # originally fragment insertion prohibitted at jump_anchors
     # -- should revisit?? (or, instead on cuts)
-    perturber, inserter, refiner = get_samplers(pose,opt,FTInfo)
+    perturber, inserter, refiner, _ = get_samplers(pose,opt,FTInfo)
        
     # 3. Score setup: term weights adjusted by scheduler
     scorer = Scorer(opt) 
@@ -420,23 +459,15 @@ def FoldTreeSample(pose,opt,FTInfo,
     return pose, scorer.score(pose)
 
 ##### simple function using GPU 
-def branch_and_select_1step(pose_in,samplers,scorer,n,
-                            weights=[], #sampler weights
+def branch_and_select_1step(pose_in,sampler,scorer,n,
                             minimizer=None,
                             prefix=None):
 
     time0 = time.time()
     poses = []
-    if weights == []: weights = [1.0 for s in samplers] #equal weight
     for i in range(n):
         pose = pose_in.clone()
-        #iran = random.randint(0,len(samplers)-1)
-        #samplers[iran].apply(pose)
-
-        op_sel = random.choices(samplers,weights)[0]
-        op_sel.apply(pose)
-        if op_sel.name.startswith("Jump") and minimizer != None:
-            minimizer.apply(pose)
+        move = sampler.apply(pose) 
         poses.append(pose)
         if prefix != None: pose.dump_pdb(prefix+"%02d.pdb"%i)
     time1 = time.time()
@@ -633,13 +664,11 @@ class Runner:
 
         return pose
 
-    def test(self,pose0=None):
+    def AnnealQ(self,pose0,FTnpz,nstep_anneal,runno=0):
         # pose0 can be provided through argument or optparser
-        if pose0 == None and self.opt.pdb_fn != None:
-            pose0 = PR.pose_from_file(self.opt.pdb_fn)
-
-        if pose0 == None:
-            sys.exit("No starting pose defined!")
+        #if pose0 == None and self.opt.pdb_fn != None:
+        #    pose0 = PR.pose_from_file(self.opt.pdb_fn)
+        #if pose0 == None: sys.exit("No starting pose defined!")
     
         PR.SwitchResidueTypeSetMover("centroid").apply(pose0)
 
@@ -655,93 +684,103 @@ class Runner:
         # store original FT
         nres = pose0.size()
         ft0 = pose0.conformation().fold_tree().clone()
-        
-        # Repeat Centroid-MC nsample_cen times
+
+        # retreive FT from input npz file
         pose = pose0.clone()
-        jumpancs, cuts = simple_ft_setup(pose,self.opt.ulrs)
-        print("JUMP ANCS: ", jumpancs)
+        FTInfo = FoldTreeInfo(pose,self.opt) #opt should have --- ?
+        if FTnpz == None:
+            simple_ft_setup(pose,ulrs=self.opt.ulrs)
+        else:
+            FTInfo.load_from_npz(FTnpz,pose,report=True)
 
         if self.opt.scoretype == "default":
             self.opt.scoretype = "Q"
-        scorer = Scorer(self.opt, cuts, normf=1.0/nres)
-        residue_weights = np.array([0.1 for k in range(nres)])
-        residue_weights_p = np.array([0.0 for k in range(nres)])
+        scorer = Scorer(self.opt, FTInfo.cuts, normf=1.0/nres)
 
-        for ulr in self.opt.ulrs:
-            for res in ulr:
-                residue_weights[res-1] = 1.0
-                residue_weights_p[res-1] = 1.0
-
-        #TODO: (predicted)loop-weighted
-        #residue_weights[:23] = 5.0
-        #residue_weights[33:40] = 5.0
-        #residue_weights[14:17] = 5.0
-        #residue_weights[47:51] = 5.0
+        # FTInfo-aware sampler
+        perturber, sampler, refiner = get_samplers(pose,self.opt,FTInfo)
         
-        sampler_p = SO.FragmentInserter(self.opt,self.opt.fragsmall,residue_weights_p,
-                                        name ="FragP") #perturber
-        
-        sampler_b = SO.FragmentInserter(self.opt,self.opt.fragbig,residue_weights,
-                                        name ="FragBig") 
-        sampler_s = SO.FragmentInserter(self.opt,self.opt.fragsmall,residue_weights,
-                                        name ="FragSmall")
-
-        # turn-off jumper til debugged
-        jumps_to_sample = [1] #0-index
-        jumper   = SO.JumpSampler([jumpancs[i] for i in jumps_to_sample],
-                                  maxtrans=1.5,maxrot=10.0,
-                                  name="Jump") #HACK
-
-        # minmover for jump only -- unused
-        sf = PR.create_score_function("score4_smooth")
-        mmap = PR.MoveMap()
-        mmap.set_bb(False)
-        mmap.set_jump(False)
-        #minimize only relevant DOF to make minimizer faster
-        for i,p in enumerate(residue_weights):
-            if p > 1.0: mmap.set_bb(i+1,True)
-        for jumpno in jumps_to_sample:
-            mmap.set_jump(jumpno+1,True)
-        
-        jump_minimizer = PR.rosetta.protocols.minimization_packing.MinMover(mmap, sf, 'lbfgs_armijo_nonmonotone', 0.0001, True) 
-        jump_minimizer.max_iter(5)
-
         ## Coarse-grained sampling stage
-        #perturb initially
+        # perturb initially
         for k in range(10):
-            sampler_p.apply(pose)
-            jumper.apply(pose)
+            perturber.apply(pose)
         
         Emin = scorer.score([pose])[0]
         print("Einit ",Emin)
         pose.dump_pdb("ipert.pdb")
         pose_min = pose
 
-        moves = [jumper,sampler_b]
-        weights = [] #[1.0,0.5] #uniform is unspecified
-        for it in range(50):
+        for it in range(nstep_anneal):
             pose_in = pose_min
-            pose_out, Eout = branch_and_select_1step(pose_in,moves,scorer,50,
-                                                     weights,
-                                                     #minimizer=jump_minimizer,
-                                                     #prefix="sample%02d"%it
-            )
+            pose_out, Eout = branch_and_select_1step(pose_in,sampler,scorer,50)
             # report insertion sites
-            sampler_s.show()
+            sampler.show()
             
             print("%3d %7.4f %7.4f %1d"%(it,Emin,Eout,(Eout<Emin)))
             if Eout < Emin: #annealing
                 pose_min = pose_out
                 Emin = Eout
-            pose_out.dump_pdb("out%02d.pdb"%(it)) #dump all trj regardless of acceptance
+
+            # trajectory
+            if it%self.opt.dump_trj_every==0 and it>0:
+                report_pose(pose_min,
+                            tag=self.opt.prefix+"%d.%d"%(runno,it),
+                            extra_score = [("Qcen",Emin)],
+                            outsilent="%s.trj%d.out"%(self.opt.prefix,runno))
+                    
+            #pose_out.dump_pdb("out%02d.pdb"%(it)) #dump all trj regardless of acceptance
 
         # recover original fully-connected FT
         rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
         pose.remove_constraints()
-
         return pose
+
+    def MacroCycle(self,pose0=None,dump_pdb=False):
+        if pose0 == None and self.opt.pdb_fn != None:
+            pose0 = PR.pose_from_file(self.opt.pdb_fn)
+
+        if pose0 == None:
+            sys.exit("No starting pose defined!")
+    
+        #setupFT.add_default_options_if_missing(self.opt)
+
+        Emin = 1.0e6 #ScorerFA([pose0])
+        pose_min = pose0.clone()
+
+        #split this for now... will be on-the-fly
+        npzs = self.opt.fts #can be None
+
+        # For first shot try nmacro = 1 & nanneal many (>100)
+        print("Run %d macrocycles of %d Qcen-annealing jobs"%(self.opt.nmacro,self.opt.nstep_anneal))
+        for it in range(self.opt.nmacro):
+            pose = pose_min
+            
+            # diversify FT on-the-fly
+            #npzs = setupFT.main(pose,self.opt)
+
+            # Try annealing with various options
+            poses_gen = []
+            if len(npzs) == 0:
+                npzs_sel = None
+            else:
+                npz_sel = random.choice(npzs)
+            pose_out = self.AnnealQ(pose,npz_sel,self.opt.nstep_anneal,
+                                    runno=0)
+            #poses_gen.append(pose_out)
+
+            # All-atom regularize
+            #Q = self.relax_and_eval(pose_out)
+            Ebest =  0.0
+            
+            # Metropolis criteria
+            if np.exp(self.opt.config['beta']*(Ebest-Emin)) > random.random():
+                pose_min = pose_best
+                Emin = Ebest
+
+        if dump_pdb:
+            pose.dump_pdb(self.opt.prefix+".final.pdb")
+        return pose_min
     
 if __name__ == "__main__":
     a = Runner()
-    a.test()
-    #a.apply()
+    a.MacroCycle(dump_pdb=True)

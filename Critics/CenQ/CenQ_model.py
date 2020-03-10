@@ -4,6 +4,8 @@ import os
 import json
 import numpy as np
 import tensorflow as tf
+import logging
+tf.get_logger().setLevel(logging.ERROR)
 from .CenQ_resnet import build_resnet
 from .InputProcess import InputGenerator
 SCRIPTPATH = os.path.dirname(os.path.abspath(__file__))

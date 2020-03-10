@@ -1,17 +1,15 @@
 import sys,copy,glob,os
 import pyrosetta as PR
 
-import config
-from Matcher import Matcher
-from TERM import TERMDB
+import basic.config #as config
+import basic.rosetta_utils #as rosetta_utils
+from basic.PoseInfo import PoseInfo
+from basic.FoldTreeInfo import FoldTreeInfo
 
-SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
+from ChunkSampler.Matcher import Matcher
+from ChunkSampler.TERM import TERMDB
 
-sys.path.insert(0,SCRIPTDIR+'/../basic')
-import estogram2FT
-from PoseInfo import *
-import rosetta_utils
-
+SCRIPTDIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0,SCRIPTDIR+'/../../utils')
 import myutils
 
@@ -26,11 +24,23 @@ def arg_parser(argv):
     
     parser.add_argument('-npz', dest='npz', required=True,
                      help='DeepAccNet results as npz format')
+    parser.add_argument('-npert_jump_loc', type=int, default=0,
+                        help='Number of FTs with jump location perturbations')
+
+    ## output
+    parser.add_argument('-outprefix', default="FT",
+                        help='prefix of output npz file')
     
     # Optional
     parser.add_argument('-offset', dest='offset', default=0.0, help="Offset in filtering score")
     parser.add_argument('-prefix', dest='prefix', default="t000_",
                         help="Prefix of output")
+    parser.add_argument('-cut_at_mid', default=True, action="store_true",
+                        help="define cut at the middle of loop, otherwise at the C-term of the loop")
+    parser.add_argument('-do_subdef', dest='do_subdef', default=False, action="store_true",
+                        help="Use subgraph decompo to get variable Jump connectivity outputs")
+    parser.add_argument('-do_termsearch', dest='do_termsearch', default=False, action="store_true",
+                        help="Use TERM db lookup to get variable ULR-SS jump candidates")
 
     # debugging
     parser.add_argument('-write_pdb', dest='write_pdb', default=False, action="store_true",
@@ -42,33 +52,11 @@ def arg_parser(argv):
         return
 
     opt = parser.parse_args()
-    opt.config = config.CONFIGS
-    
+    opt.config = basic.config.CONFIGS
     return opt
 
-def main(opt):        
-    pose = PR.pose_from_pdb(opt.pdb)
-    
-    #opt.ulrs = [list(range(22,36))] #manual assignment for debugging...
-
-    ### SETUP PART
-    ## FoldTreeInfo, PoseInfo, TERMDB, 
-    # 1. FoldTree setup:
-    # read in ULR/Jump info from estogram2FT: estogram should be always supported
-    FTInfo = estogram2FT.main(pose,opt) #== FoldTreeInfo class
-    ulrSSs = FTInfo.extraSS_at_ulr # Defined as list of SSclass, ULR but predicted as SS 
-
-    # 2. Pose info setup
-    poseinfo = PoseInfo(pose,opt,FTInfo,SSpred_fn=opt.SSpred_fn)
-    anctypes = [SS[:-1] for SS in opt.config['SSTYPE_SUPPORTED']]
-    poseinfo.find_ULR_anchors(FTInfo,anctypes,report=opt.debug) #precompute potential ULR anchors
-
-    # 3. TERM database; TODO: make loop db in same format
-    full_db = {}
-    for SStype in opt.config['SSTYPE_SUPPORTED']:
-        db = TERMDB(opt,SStype)
-        if db.db != []: full_db[SStype] = db
-
+# unused
+def idealize_ulrs(pose,poseinfo,FTInfo):
     # EXTRA: Idealize & extend at ULR regions so that torsion replacement make sense...
     # CHECK THROUGH ESTOGRAM && CONFIDENCE
     print("\n[ChunkSampler/main] ======Extend and idealize pose around ULR=======")
@@ -78,10 +66,20 @@ def main(opt):
     stoppoints.sort()
     extended_mask = [False for res in range(poseinfo.nres)]
     for ulr in FTInfo.ulrs:
-        rosetta_utils.local_extend(pose_ext,extended_mask,ulr,stoppoints,idealize=True)
+        basic.rosetta_utils.local_extend(pose_ext,extended_mask,ulr,stoppoints,idealize=True)
     if opt.debug: pose_ext.dump_pdb("ideal_ext.pdb")
     poseinfo.extended_mask = extended_mask #store at poseinfo
+    return pose_ext
 
+def TERMsearch(opt,poseinfo,FTInfo):
+    # TERM database; TODO: make loop db in same format
+    full_db = {}
+    for SStype in opt.config['SSTYPE_SUPPORTED']:
+        db = TERMDB(opt,SStype)
+        if db.db != []: full_db[SStype] = db
+        
+    anctypes = [SS[:-1] for SS in opt.config['SSTYPE_SUPPORTED']]
+    poseinfo.find_ULR_anchors(FTInfo,anctypes,report=opt.debug) #precompute potential ULR anchors
     ### SCAN STARTS
     ##  Scan through SScombs 
     print("\n[ChunkSampler/main] ========== Scan %d ULRSSs =========="%len(ulrSSs))
@@ -154,9 +152,86 @@ def main(opt):
     #jump_at_ULR = FTInfo.jumps[ulrSSs[0].jumpid] #bug?
     poses_move = jump_at_ULR.moveset_to_pose( pose_ext, mode='all', report_pdb=True )
 
-    return pose_ext, FTInfo #are these sufficient??
+def get_list_of_ulr_defs(FTInfo):
+    # take full ulr
+    defs = [FTInfo.ulrs_aggr,FTInfo.ulrs_cons]
+
+    # take one by one
+    for ulr in FTInfo.ulrs_aggr:
+        defs.append([ulr])
+
+    # see if any other jump is less reliable...
+    for i,jump in enumerate(FTInfo.jumps):
+        jumpconf = np.mean(self.Qres[jump.reslist[0]-1:jump.reslist[-1]]) #confidence of current struct
+        print( " Jump %d %3d-%3d (ulr=%d): confidence %.3f"%(i,jump.reslist[0],jump.reslist[-1],
+                                                             jump.is_ULR,jumpconf) )
+                            
+    return defs 
     
+def main(opt,pose=None,FTnpz=None):
+    if pose == None and opt.pdb != None:
+        pose = PR.pose_from_pdb(opt.pdb)
+    if FTnpz == None:
+        FTnpz = opt.npz
+
+        
+    if pose == None or FTnpz == None:
+        sys.exit("No input pose and/or FTnpz provided!")
+    
+    ### SETUP PART
+    # 1. Pose info setup
+    poseinfo = PoseInfo(pose,opt,SSpred_fn=opt.SSpred_fn)
+    
+    # 2. FoldTree setup
+    # read in ULR/Jump info from estogram2FT: estogram should be always provided
+    
+    FTInfo = FoldTreeInfo(pose,opt)
+    FTInfo.init_from_estogram(pose,opt,npz=FTnpz,poseinfo=poseinfo)
+    
+    #ulrSSs = FTInfo.extraSS_at_ulr # Defined as list of SSclass, ULR but predicted as SS 
+    if opt.do_termsearch: # append info into FTInfo
+        TERMsearch(opt,poseinfo,FTInfo)
+
+    variable_ulr_defs = get_list_of_ulr_defs(FTInfo)
+
+    ## Output multiple FT options of ulrs/subs into individual npz
+    # a. freeze sub & go through ulrs
+    for i,ulrs in enumerate(variable_ulr_defs):
+        print("======= Generating %s.ulrdef%d.npz..."%(opt.outprefix,i))
+        FTInfo.setup_fold_tree(pose,opt,poseinfo,ulrs=ulrs)
+        FTInfo.save_as_npz(opt.outprefix+".ulrdef%d.npz"%(i))
+
+    # b. allow jumps to move, freeze ulr as 
+    FTInfo_tmp = copy.copy(FTInfo) #safe???
+    FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=FTInfo.ulrs_cons)
+    for i,fQcut in enumerate([0.2,0.3]):
+        print("======= Generating %s.jump%d.npz..."%(opt.outprefix,i))
+        FTInfo_tmp.save_as_npz(opt.outprefix+".jump%d.npz"%(i),fQcut=fQcut)
+
+    # c. freeze ulrs & go through subs
+    for i,subdef in enumerate(FTInfo.subdefs):
+        print("======= Generating %s.subdef%d.npz..."%(opt.outprefix,i))
+        FTInfo.setup_fold_tree(pose,opt,poseinfo,subdef_in=subdef)
+        FTInfo.save_as_npz(opt.outprefix+".subdef%d.npz"%(i))
+
+    # c. randomize jump centers a bit
+    for i in range(opt.npert_jump_loc):
+        print("======= Generating %s.cendef%d.npz..."%(opt.outprefix,i))
+        FTInfo_tmp = copy.copy(FTInfo) #safe???
+        FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=ulrs,max_pert_jump_loc=3)
+        FTInfo_tmp.save_as_npz(opt.outprefix+".cendef%d.npz"%(i))
+        
+# check
+def check(opt):
+    npzs = glob.glob(opt.outprefix+".cendef?.npz")
+    for npz in npzs:
+        print("*** Loading %s"%npz)
+        pose = PR.pose_from_pdb(opt.pdb)
+        FTInfo = FoldTreeInfo(pose,opt)
+        FTInfo.load_from_npz(npz,pose,report=True)
+        
 if __name__ == "__main__":
     opt = arg_parser(sys.argv[1:])
     PR.init('-mute all')
     main(opt)
+    check(opt)

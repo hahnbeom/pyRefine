@@ -4,10 +4,23 @@ import numpy as np
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0,SCRIPTDIR+'/../Critics')
 print (sys.path)
-#sys.path.insert(0,'/home/hpark/NextGenSampler/pyrosetta/Critics')
 import tensorflow as tf
+import logging
+tf.get_logger().setLevel(logging.ERROR)
+
 import CenQRunner
+#import FaQRunner
 import pyrosetta as PR
+
+class ScorerFA:
+    def __init__(self): #only Qfa
+        self.FaQscorer = FaQRunner.Scorer()
+        self.dist_in = np.load(opt.dist)['dist'].astype(np.float32)
+
+    def score(self,poses):
+        FaQ_s = self.Qscorer.score(poses, dist=self.dist_in)
+        Es = -np.mean(FaQ_s,axis=1) # estimated residue-wise lddts
+        return Es
 
 class Scorer:
     def __init__(self,opt,cuts=[],normf=1.0):
@@ -18,13 +31,15 @@ class Scorer:
         self.sfxn = None
         if self.scoretype.endswith(".wts"):
             self.init_from_wts_file(normf=normf)
-        elif self.scoretype == 'Q': #Q-only
-            self.wts['Q'] = 1.0
+        elif self.scoretype == 'Qcen': #Q-only
+            self.wts['Qcen'] = 1.0
+        elif self.scoretype == 'Qfa': #Q-only
+            self.wts['Qfa'] = 1.0
         else:
             self.init_from_wts_file(normf=normf)
         print("SETUP Scorer, weights: ", self.wts)
 
-        if 'Q' in self.wts:
+        if 'Qcen' in self.wts:
             if opt.dist != None:
                 self.cenQscorer = CenQRunner.Scorer()
                 self.dist_in = np.load(opt.dist)['dist'].astype(np.float32)
@@ -36,7 +51,7 @@ class Scorer:
             for res in cuts[:-1]: # final cut position = C-terminal
                 chain_breaks.extend([res, res+1])
             self.chain_breaks = chain_breaks
-
+            
         if 'dssp' in self.wts:
             self.Edssp = 1e6
             self.wdssp = 5.0
@@ -65,8 +80,8 @@ class Scorer:
             words = l[:-1].split()
             scoretype = words[0]
             wts = float(words[1])
-            if scoretype == "Q":
-                self.wts['Q'] = wts
+            if scoretype == "Qcen":
+                self.wts['Qcen'] = wts
             elif scoretype == "dssp":
                 self.wts['dssp'] = wts*normf
             elif not scoretype.startswith("#"):
@@ -120,12 +135,12 @@ class Scorer:
         Es = np.zeros(len(poses))
         self.by_component = [{} for pose in poses] #cached every call
         
-        if "Q" in self.wts:
+        if "Qcen" in self.wts:
             CenQ_s = self.cenQscorer.score(poses, dist=self.dist_in, res_ignore=self.chain_breaks)
-            Es -= self.wts["Q"]*np.mean(CenQ_s,axis=1) # estimated residue-wise lddts
+            Es -= self.wts["Qcen"]*np.mean(CenQ_s,axis=1) # estimated residue-wise lddts
 
             for i,CenQ in enumerate(CenQ_s):
-                self.by_component[i]['Q'] = -self.wts["Q"]*np.mean(CenQ) #better keep as perres?
+                self.by_component[i]['Qcen'] = -self.wts["Qcen"]*np.mean(CenQ) #better keep as perres?
             
         for i,pose in enumerate(poses):
             if "dssp" in self.wts and self.ss8 != []:

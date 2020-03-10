@@ -1,0 +1,7 @@
+#!/bin/bash
+
+# for generating  FTnpz files
+python ../..//Rosetta/setupFT.py  -pdb init.pdb -SSpred SS.npz -npz DAN.npz
+
+# for checking the content
+python ../../Rosetta/basic/FoldTreeInfo.py FT.jump0.npz

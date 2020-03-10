@@ -19,5 +19,6 @@ CONFIGS = {
     'RMSD_ANCHOR_CUT' : 2.0,
     'DUPLICATION_RMSD': 5.0,
     'MAX_CLASH_COUNT' : 1,
+    'beta'            : 1.0 
     
 }

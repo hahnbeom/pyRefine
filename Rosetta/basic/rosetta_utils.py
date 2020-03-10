@@ -120,7 +120,7 @@ def pose2SSs(pose,maskres=[],min_chunk_len=[3,5,1000], #[E,H,C]; C: preserve unm
             SSs.append(list(range(ires,fres+1)))
     return SSs, [SS3stat[SS[0]-1] for SS in SSs] #SS3stat -- this not working properly?
 
-def extraSS_from_prediction(regions,SS3pred,report=True,minlen=5):
+def extraSS_from_prediction(regions,SS3pred,mask_in=None,report=True,minlen=5):
     extraSSs = []
     SStypes = []
     for reg in regions:
@@ -136,6 +136,10 @@ def extraSS_from_prediction(regions,SS3pred,report=True,minlen=5):
                 continue
 
             SSreg = list(range(ni,ni+len(part)))
+            # check if overlaps with already claimed res
+            overlap = [res for res in SSreg if res in mask_in] #0-index
+            if overlap != []: continue
+            
             mask = [i+1 for i in range(len(SS3pred)) if (SS3pred[i] in ['H','E'] and i+1 not in reg)]
 
             if (SStype == 'E' and len(part) >= 3) or (SStype == 'H' and len(part) >= 7):

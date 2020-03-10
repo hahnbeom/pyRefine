@@ -1,12 +1,12 @@
 import sys,copy,os
 import pyrosetta as PR
 import numpy as np
-import rosetta_utils
 
 SCRIPTDIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0,SCRIPTDIR)
 sys.path.insert(0,'%s/../../utils'%SCRIPTDIR)
+import rosetta_utils
 import myutils
-
 
 ## SSClass should be transferrable <=> pyRefine Jump
 class SSclass:
@@ -39,21 +39,23 @@ class SSclass:
 
         self.CAcrds_al = np.zeros((self.nres,3))
         self.bbcrds_al = np.zeros((self.nres,5,3))
-        
+
         self.cenpos = int(self.nres/2) #position, 0-index -- may vary below
 
-        ## 
         if poseinfo != None:
             self.tag = poseinfo.tag
             self.seq = poseinfo.seq[begin-1:end]
             self.crds_from_pose(poseinfo)
             
+            # overwrite
             if isinstance(cenpos,int):
                 self.cenpos = cenpos
             elif cenpos == 'com':
                 com = np.sum(self.CAcrds,axis=0)/self.nres
                 ds = [np.dot(xyz-com,xyz-com) for xyz in self.CAcrds]
                 self.cenpos = np.argmin(ds)
+            else:
+                self.cenpos = int(self.nres/2) #position, 0-index -- may vary below
                 
         self.cenres = begin + self.cenpos
 
@@ -66,6 +68,12 @@ class SSclass:
         self.bbcrds = poseinfo.bbcrds[self.begin-1:self.end]
         self.get_frame() #update axes by default
 
+    # definition of 5 contiguous residues to assign TERM
+    def get_frame(self,update_axes=True,n=5):
+        half = int(n/2)
+        if update_axes: self.get_axes()
+        self.frame = self.CAcrds[self.cenpos-half:self.cenpos+half+1]
+
     # calculate from CAcrds
     def get_axes(self):
         if self.bbcrds != [] and self.CAcrds != []:
@@ -74,12 +82,6 @@ class SSclass:
             z /= np.sqrt(np.dot(z,z))
             x = self.CBcrds[self.cenpos]-com
             self.axes = [com,z,x]
-
-    # definition of 5 contiguous residues to assign TERM
-    def get_frame(self,update_axes=True,n=5):
-        half = int(n/2)
-        if update_axes: self.get_axes()
-        self.frame = self.CAcrds[self.cenpos-half:self.cenpos+half+1]
 
     def get_refcrd(self):
         return self.CAcrds[self.cenpos]
@@ -238,11 +240,12 @@ class PoseInfo:
                     SSseg_ext = self.try_SS_extension_by_structure(SSseg, SSmask)
                 SSseg_ext.iSS = len(self.SSs)
                 self.SSs.append(SSseg_ext)
+                #print(SSseg.nres,SSseg_ext.nres)
             else:
                 self.SSs.append(SSseg)
                 
             SSmask += self.SSs[-1].reslist
-            i1 += self.SSs[-1].nres #???? CHECK
+            i1 += len(part) #self.SSs[-1].nres #???? CHECK
 
     # Version using prediction
     def try_SS_extension_by_prediction(self,SSseg,SSmask):
