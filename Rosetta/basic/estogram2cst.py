@@ -89,19 +89,21 @@ class Pair:
         
         funcs = []
         if functype == 'bounded':
-            funcs.append(rosetta.core.scoring.constraints.BoundFunc(self.d0-tol,self.d0+tol,
+            funcs.append(PR.rosetta.core.scoring.constraints.BoundFunc(self.d0-tol,self.d0+tol,
                                                                     sig,""))
         elif functype == 'fharm':
-            funcs.append(rosetta.core.scoring.func.FlatHarmonicFunc(self.d0,sig,tol))
+            funcs.append(PR.rosetta.core.scoring.func.FlatHarmonicFunc(self.d0,sig,tol))
+            
         elif functype == 'sigmoid':
-            w = 1.0
+            #w = 1.0
             m = 5.0/sig
-            x1 = d0-tol
-            x2 = d0+tol
-            func1 = (-w,d0-tol,m,w)
-            func2 = ( w,d0+tol,m,w)
-            funcs.append(func1)
-            funcs.append(func2)
+            x1 = self.d0-tol
+            x2 = self.d0+tol
+            func1 = PR.rosetta.core.scoring.func.SigmoidFunc(x1,m) #(-w,self.d0-tol,m,w)
+            func2 = PR.rosetta.core.scoring.func.SigmoidFunc(x2,m) #( w,self.d0+tol,m,w)
+            funcs.append(PR.rosetta.core.scoring.func.ScalarWeightedFunc(-1.0,func1))
+            funcs.append(PR.rosetta.core.scoring.func.ScalarWeightedFunc(1.0,func2))
+            # constant offset not included
             
         if out != None:
             i = self.ids[0].rsd()
@@ -255,9 +257,9 @@ def find_pairs(pose,estogram,dcut=35.0):
         id1 = PR.rosetta.core.id.AtomID(atm_i,i+1)
         
         for j in range(i+4,nres):
-            if pose.residue(i+1).has('CB'): atm_j = 'CB'
+            if pose.residue(j+1).has('CB'): atm_j = 'CB'
             else: atm_j = 'CA'
-            atm_j = pose.residue(i+1).atom_index(atm_j)
+            atm_j = pose.residue(j+1).atom_index(atm_j)
             id2 = PR.rosetta.core.id.AtomID(atm_j,j+1)
 
             xyz_i = pose.xyz(id1)
@@ -322,7 +324,6 @@ def apply_on_pose( pose, npz, opt, debug=False, reportf=None ):
                 funcs.append( p.estogram2contact(out=out) )
                 ncont += 1
 
-            
         if p.d0 <= DCUT_HARD and p.Pcen >= Pcore_cut:
             funcs += p.estogram2core(functype=opt.hardcsttype,
                                      out=out)

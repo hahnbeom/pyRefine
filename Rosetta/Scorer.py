@@ -1,4 +1,4 @@
-import os,sys
+import os,sys,copy
 import numpy as np
 
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
@@ -9,26 +9,17 @@ import logging
 tf.get_logger().setLevel(logging.ERROR)
 
 import CenQRunner
-#import FaQRunner
 import pyrosetta as PR
-
-class ScorerFA:
-    def __init__(self): #only Qfa
-        self.FaQscorer = FaQRunner.Scorer()
-        self.dist_in = np.load(opt.dist)['dist'].astype(np.float32)
-
-    def score(self,poses):
-        FaQ_s = self.Qscorer.score(poses, dist=self.dist_in)
-        Es = -np.mean(FaQ_s,axis=1) # estimated residue-wise lddts
-        return Es
 
 class Scorer:
     def __init__(self,opt,cuts=[],normf=1.0):
         self.scoretype = opt.scoretype
         self.kT_mulfactor = 1.0 #??
+        self.normf = normf
 
         self.wts = {}
         self.sfxn = None
+        self.cenQscorer = None
         if self.scoretype.endswith(".wts"):
             self.init_from_wts_file(normf=normf)
         elif self.scoretype == 'Qcen': #Q-only
@@ -38,7 +29,9 @@ class Scorer:
         else:
             self.init_from_wts_file(normf=normf)
         print("SETUP Scorer, weights: ", self.wts)
-
+        self.wts0 = copy.copy(self.wts)
+        if self.sfxn != None: self.sfxn0 = self.sfxn.clone()
+        
         if 'Qcen' in self.wts:
             if opt.dist != None:
                 self.cenQscorer = CenQRunner.Scorer()
@@ -68,6 +61,10 @@ class Scorer:
                 self.ss3[:,1] = np.sum([self.ss8[:,0],self.ss8[:,1],self.ss8[:,2]],axis=0) #E
                 self.ss3[:,2] = np.sum([self.ss8[:,6],self.ss8[:,7],self.ss8[:,8]],axis=0) #C
 
+    def close(self):
+        if self.cenQscorer != None:
+            self.cenQscorer.close()
+
     def init_from_wts_file(self,normf=1.0):
         self.wts['rosetta'] = 1.0*normf
         
@@ -87,7 +84,7 @@ class Scorer:
             elif not scoretype.startswith("#"):
                 st = PR.rosetta.core.scoring.score_type_from_name(scoretype)
                 self.sfxn.set_weight(st, wts)
-            
+           
     def calc_dssp_agreement_score(self,pose,res_s):
         dssp = PR.rosetta.core.scoring.dssp.Dssp(pose)
         ss8_type = np.array(list("BEGHIST "), dtype='|S1').view(np.uint8)
@@ -108,8 +105,11 @@ class Scorer:
             E -= self.ss3[res-1,dssp3[res-1]]
         return E*self.wdssp
 
-    def reset_wts(self,scoretype,wts):
-        self.sfxn.set_weight(scoretype, wts)
+    def reset_scale(self,scoretype,scale):
+        if scoretype in self.wts:
+            self.wts[scoretype] = self.wts0[scoretype]*scale
+        else:
+            self.sfxn.set_weight(scoretype, scale*self.sfxn0[scoretype])
     
     def get_term(self,pose,scoretype):
         return pose.energies().total_energies()[scoretype]
@@ -132,15 +132,20 @@ class Scorer:
         return self.kT0*self.kT_mulfactor
 
     def score(self,poses):
+        is_single_input = False
+        if not isinstance(poses,list):
+            is_single_input = True
+            poses = [poses]
+            
         Es = np.zeros(len(poses))
         self.by_component = [{} for pose in poses] #cached every call
         
-        if "Qcen" in self.wts:
+        if "Qcen" in self.wts and abs(self.wts['Qcen']) > 1.0e-6:
             CenQ_s = self.cenQscorer.score(poses, dist=self.dist_in, res_ignore=self.chain_breaks)
-            Es -= self.wts["Qcen"]*np.mean(CenQ_s,axis=1) # estimated residue-wise lddts
+            Es += self.wts["Qcen"]*np.mean(CenQ_s,axis=1) # estimated residue-wise lddts
 
             for i,CenQ in enumerate(CenQ_s):
-                self.by_component[i]['Qcen'] = -self.wts["Qcen"]*np.mean(CenQ) #better keep as perres?
+                self.by_component[i]['Qcen'] = self.wts["Qcen"]*np.mean(CenQ) #better keep as perres?
             
         for i,pose in enumerate(poses):
             if "dssp" in self.wts and self.ss8 != []:
@@ -150,7 +155,16 @@ class Scorer:
                 
             if "rosetta" in self.wts:
                 rosetta_score = self.sfxn.score(pose)
+                emap = pose.energies().total_energies()
+                cst = self.sfxn[PR.rosetta.core.scoring.atom_pair_constraint]*emap[PR.rosetta.core.scoring.atom_pair_constraint]
+                chainbrk = self.sfxn[PR.rosetta.core.scoring.linear_chainbreak]*emap[PR.rosetta.core.scoring.linear_chainbreak]
+                
                 Es[i] += self.wts["rosetta"]*rosetta_score
                 self.by_component[i]['rosetta'] = self.wts["rosetta"]*rosetta_score
-            
-        return Es
+                self.by_component[i]['chainbrk'] = self.wts["rosetta"]*chainbrk
+                self.by_component[i]['cst'] = self.wts["rosetta"]*cst
+
+        if is_single_input:
+            return Es[0]
+        else:
+            return Es

@@ -74,7 +74,7 @@ def arg_parser(argv):
     opt.add_argument('-chunk_fn', dest='chunk_fn', metavar='CHUNK_FN', default=None,
                      help="TERM chunk search result file")
     opt.add_argument('-native', dest='native', default=None, help='Input ref file')
-    opt.add_argument('-npz', dest='npz', default=None, help='Outcome of DeepAccNet in npz format')
+    opt.add_argument('-estogram', dest='estogram', default=None, help='Outcome of DeepAccNet in npz format')
     opt.add_argument('-FT', dest='fts', default=[], nargs="+",
                      help='FoldTree definitions')
  
@@ -102,6 +102,8 @@ def arg_parser(argv):
     ## Scoring options
     opt.add_argument('-score', dest='scoretype', metavar="SCORE", default="default",\
                      help='centroid Score type')
+    opt.add_argument('-score', dest='scoretype', metavar="SCORE", default="default",\
+                     help='centroid Score type')
     opt.add_argument('-cen_cst', dest='cen_cst', default=None, help='centroid restraint file')
     opt.add_argument('-fa_cst', dest='fa_cst', default=None, help='fullatom restraint file')
     opt.add_argument('-cen_cst_w', dest='cen_cst_w', type=float, default=1.0, help='')
@@ -111,12 +113,12 @@ def arg_parser(argv):
     
     ###### Sampling options
     ### Scheduling
-    opt.add_argument('-nstep_anneal', type=int, default=20,
-                     help='num. steps for each AnnealQ runs')
+    #opt.add_argument('-nstep_anneal', type=int, default=20,
+    #                 help='num. steps for each AnnealQ runs')
     opt.add_argument('-nmacro', type=int, default=1,
                      help='num. steps for macro cycles')
     ### relative weights
-    opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[1.0,0.0,0.0], #fraginsert only
+    opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[1.0,1.0,0.0], #fraginsert only
                      help="weights on movers [frag-insert/jump-opt/motif-insert]")
     
     ### Jump-opt
@@ -210,8 +212,9 @@ def get_residue_weights(opt,FTInfo,nres,nmer):
         print( "Fragment insertion disallowed: "+" %d"*len(disallowed)%tuple(disallowed))
 
     residue_weights = [0.0 for k in range(nres)]
+    print("?", FTInfo.ulrs)
     ulrres = []
-    for ulr in FTInfo.ulrs: ulrres += ulr
+    for ulr in FTInfo.ulrs: ulrres += list(ulr)
 
     if opt.frag_insertion_mode == "weighted":
         # 1. From user input
@@ -266,12 +269,26 @@ def get_samplers(pose,opt,FTInfo=None):
     
     residue_weights_big = get_residue_weights(opt,FTInfo,nres,9)
     residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
-
+    '''
+    residue_weights_close = np.zeros(nres)+0.1
+    for cut in FTInfo.cuts:
+        for k in range(-9,10):
+            if cut+k < 1 or cut+k >= nres: continue
+            residue_weights_close
+    '''
+        
     # get list of jumps to sample
     jumps_to_sample = [i for i,jump in enumerate(FTInfo.jumps) if jump.movable]
     print("Jumps to sample",  jumps_to_sample)
     
-    # Sampler
+    ## Samplers
+    # MultifragMCmover for closure
+    closureMCmover = SO.FragmentMC(opt,opt.fragbig,
+                                   residue_weights_big,
+                                   name="ClosureMC")
+    closer = SO.SamplingMaster(opt,[closureMCmover],[1.0],"Closer")
+
+    # Fragment insertion
     if opt.mover_weights[0] > 1.0e-6:
         w = opt.mover_weights[0]
 
@@ -298,13 +315,15 @@ def get_samplers(pose,opt,FTInfo=None):
         refine_w += [w]
         print("Make Fragment sampler with weight %.3f..."%w)
 
+    # Jump mover
     # Segment searcher also part of here, stub defs passed through FTInfo
     if opt.mover_weights[1] > 1.0e-6:
         w = opt.mover_weights[1]
-        perturber = SO.JumpSampler(opt,FTInfo,
-                                   1.0,5.0,name="JumpBig")
-        refiner   = SO.JumpSampler(opt,FTInfo,
-                                   0.5,2.0,name="JumpSmall")
+        jumpcens = [jump.cen for jump in FTInfo.jumps]
+        perturber = SO.JumpSampler(jumpcens,
+                                   2.0,15.0,name="JumpBig")
+        refiner   = SO.JumpSampler(jumpcens,
+                                   1.0,5.0,name="JumpSmall")
         pert_units += [perturber]
         pert_w += [w]
         main_units += [perturber]
@@ -335,7 +354,7 @@ def get_samplers(pose,opt,FTInfo=None):
     mainmover.minimizer = minimizer
     refiner.minimizer = minimizer
     
-    return perturber, mainmover, refiner
+    return perturber, mainmover, refiner, closer
 
 # One step of MC in FT hybridize
 def MC(pose,scorer,sampler,opt,tot_it,
@@ -424,7 +443,7 @@ def FoldTreeSample(pose,opt,FTInfo,
     ## slightly randomize at the beginning; make extended at ULR
     SO.perturb_pose_given_ft_setup( pose, FTInfo )
     if opt.debug: pose.dump_pdb("stage0.pdb")
-    
+
     # 5. MC
     scheduler = Scheduler(opt)
     #if opt.sch_fn != '':  scheduler = read_scheduler_from_file(opt.sch_fn)
@@ -502,11 +521,18 @@ def report_pose(pose,tag,extra_score,outsilent,mute=False):
         pose.dump_pdb(tag)
 
 class Scheduler:
-    def __init__(self,opt):
-        #self.load_dflt_sch()
-        self.load_dflt_sch()
-        if opt.debug:
+    def __init__(self,opt,do_Qopt=False):
+        # leave it undefined unless overloaded below
+        self.wQ = []
+        self.wdssp = [] 
+
+        if do_Qopt:
+            self.load_Qanneal_sch()
+        elif opt.debug:
             self.load_debug_sch()
+        else:
+            self.load_dflt_sch()
+        #apply as "scale"
         self.kT   = [opt.kT0*kT for kT in self.kT]
         self.wcst = [w*opt.cen_cst_w for w in self.wcst]
 
@@ -523,9 +549,18 @@ class Scheduler:
         self.wbrk  = [0.0,  0.1, 0.1, 0.3, 0.2, 0.7, 0.5, 1.0, 0.8, 1.0, 1.0]
         self.wcst  = [0.0,  0.1,0.25,0.25,0.25,0.25,0.25,0.25, 0.25,0.25,1.0]
 
+    def load_Qanneal_sch(self):
+        #pert/insert/refine/closure
+        self.niter = [10,   20,  10,  10]
+        self.kT    = [0.0, 0.0, 0.0, 1.0]
+        self.wvdw  = [0.1, 1.0, 1.0, 1.0]
+        self.wbrk  = [0.0, 0.1, 0.1, 1.0]
+        self.wcst  = [0.1, 1.0, 1.0. 1.0]
+        self.wQ    = [0.1, 1.0, 1.0, 0.0]
+        self.wdssp = [0.1, 1.0, 1.0. 1.0]
+
     def load_debug_sch(self):
-        self.niter = [100 , 500, 500,  500]
-        #self.kT    = [2.5,  1.0, 1.0, 1.0]
+        self.niter = [100 , 500, 500, 500]
         self.kT    = [2.5,  2.5, 2.5, 2.5]
         self.wvdw  = [0.1,  1.0, 1.0, 1.0]
         self.wbrk  = [0.0,  0.1, 0.5, 1.0]
@@ -536,6 +571,8 @@ class Scheduler:
         
     def adjust_scorer(self,it,scorer):
         scorer.reset_kT( self.kT[it] )
+        if it < len(self.wQ): scorer.reset_wts( "Qcen", self.wQ[it] )
+        if it < len(self.wdssp): scorer.reset_wts( "dssp", self.wdssp[it] )
         scorer.reset_wts( PR.rosetta.core.scoring.vdw, self.wvdw[it] )
         scorer.reset_wts( PR.rosetta.core.scoring.linear_chainbreak,    self.wbrk[it] )
         scorer.reset_wts( PR.rosetta.core.scoring.atom_pair_constraint, self.wcst[it] )
@@ -592,7 +629,7 @@ class Runner:
         nsample_cen = self.opt.nstruct*self.opt.batch_per_relax
 
         # setup FTInfo: ULR, Sub definitions, and so on...
-        FTInfo = load_FTInfo( opt.ftinfo_fn )#estogram2FT.main( opt.npz, pose, opt )
+        FTInfo = load_FTInfo( opt.ftinfo_fn )
             
         # Repeat Centroid-MC nsample_cen times
         poses_store = []
@@ -697,11 +734,11 @@ class Runner:
         scorer = Scorer(self.opt, FTInfo.cuts, normf=1.0/nres)
 
         # FTInfo-aware sampler
-        perturber, sampler, refiner = get_samplers(pose,self.opt,FTInfo)
+        perturber, inserter, refiner, closer = get_samplers(pose,self.opt,FTInfo)
         
         ## Coarse-grained sampling stage
         # perturb initially
-        for k in range(10):
+        for k in range(scheduler.niter[0]):
             perturber.apply(pose)
         
         Emin = scorer.score([pose])[0]
@@ -709,27 +746,56 @@ class Runner:
         pose.dump_pdb("ipert.pdb")
         pose_min = pose
 
-        for it in range(nstep_anneal):
-            pose_in = pose_min
-            pose_out, Eout = branch_and_select_1step(pose_in,sampler,scorer,50)
-            # report insertion sites
-            sampler.show()
-            
-            print("%3d %7.4f %7.4f %1d"%(it,Emin,Eout,(Eout<Emin)))
-            if Eout < Emin: #annealing
-                pose_min = pose_out
-                Emin = Eout
+        # to report
+        poses_out = []
+        extras_out = {'GDTMM_cen':[],
+                      'GDTMM_final':[],
+                      'Qcen':[]}
 
-            # trajectory
-            if it%self.opt.dump_trj_every==0 and it>0:
-                report_pose(pose_min,
-                            tag=self.opt.prefix+"%d.%d"%(runno,it),
-                            extra_score = [("Qcen",Emin)],
-                            outsilent="%s.trj%d.out"%(self.opt.prefix,runno))
-                    
-            #pose_out.dump_pdb("out%02d.pdb"%(it)) #dump all trj regardless of acceptance
+        scheduler = Scheduler(opt)
+        it = 0
+        for stage in range(1,scheduler.nstages()):
+            scheduler.adjust_scorer(stage,scorer)
+
+            if stage == scheduler.nstages()-2:
+                sampler = refiner
+            elif stage == scheduler.nstages()-1:
+                closer.scorer = scorer #required
+                closer.kT = scheduer.kT[stage]
+                sampler = closer
+            else: sampler = inserter
+
+            niter = scheduler.get_niter(stage)
+            print("Running stage %d, niter=%d..."%(stage,niter))
+            for i in range(niter):
+                pose_in = pose_min
+                pose_out, Eout = branch_and_select_1step(pose_in,sampler,scorer,50)
+                # report insertion sites
+                sampler.show()
+            
+                print("%3d %7.4f %7.4f %1d"%(it,Emin,Eout,(Eout<Emin)))
+                if Eout < Emin: #annealing
+                    pose_min = pose_out
+                    Emin = Eout
+
+                # trajectory
+                if it%self.opt.dump_trj_every==0 and it>0:
+                    poses_out.append(pose_min)
+                    extras_out['Qcen'].append(Emin)
+                    if refpose != None:
+                        gdtmm = PR.rosetta.protocols.hybridization.get_gdtmm(refpose,pose_min,aln)
+                        extras_out['GDTMM_cen'].append()
+                
+                    '''
+                    report_pose(pose_min,
+                    tag=self.opt.prefix+"%d.%d"%(runno,it),
+                    extra_score = [("Qcen",Emin),("gdtmm",gdtmm)],
+                    outsilent="%s.trj%d.out"%(self.opt.prefix,runno))
+                    '''
+                it += 1
 
         # recover original fully-connected FT
+        for pose in poses:
         rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
         pose.remove_constraints()
         return pose

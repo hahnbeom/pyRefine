@@ -171,7 +171,7 @@ def try_SS_extension_by_prediction(reg_org,pred,mask,SStype,
 
     # extend to Cterm
     for k in range(maxext):
-        if (res2 > len(pred)) or (res2+1 in mask): break
+        if (res2 >= len(pred)) or (res2+1 in mask): break
         if allow_coil:
             if pred[res2] not in ['C',SStype]: break
         elif (pred[res2] != SStype): break
@@ -414,7 +414,46 @@ def Qmul(Q1,Q2):
     Q[3] = Q2[0] * Q1[3] + Q2[1] * Q1[2] - Q2[2] * Q1[1] + Q2[3] * Q1[0]
     Q /= np.sqrt(np.dot(Q,Q))
     return Q
+
+def simple_ft_setup(pose,ulrs):
+    nres = pose.size()
     
+    ulrres = []
+    for ulr in ulrs: ulrres += ulr
+    print("ULR: ", ulrres )
+    
+    SSs, SS3type = rosetta_utils.pose2SSs(pose,ulrres)
+
+    jumpdef = []
+    cuts = []
+    resno = 0
+    for i,SS in enumerate(SSs):
+        cen = SS[int(len(SS)/2)]
+        jumpdef.append( (nres+1, cen) )
+        if i == len(SSs)-1: cuts.append(nres)
+        else:
+            loopcen = int((SSs[i+1][0]+SS[-1])/2)
+            cuts.append(loopcen)
+
+    #jumpdef = [(69,23),(69,46)] #HACK
+    print( "CUTS: ", cuts)
+    print( "JUMPS: ", jumpdef )
+        
+    ft = pose.conformation().fold_tree().clone()
+    stat = rosetta_utils.tree_from_jumps_and_cuts(ft,nres+1,jumpdef,cuts,nres+1)
+
+    if not pose.residue(pose.size()).is_virtual_residue(): 
+        rosetta.core.pose.addVirtualResAsRoot(pose)
+    rosetta.core.pose.symmetry.set_asymm_unit_fold_tree( pose, ft )
+    rosetta.protocols.loops.add_cutpoint_variants( pose )
+
+    for res in ulrres:
+        pose.set_phi(res,-135.0)
+        pose.set_psi(res, 135.0)
+        pose.set_omega(res, 180.0)
+
+    return [jump[1] for jump in jumpdef], cuts
+
 def reset_fold_tree(pose, nres, saved_ft):
     pose.conformation().delete_residue_range_slow(nres+1, pose.size())
     pose.conformation().fold_tree(saved_ft)
@@ -433,3 +472,29 @@ def reset_fold_tree(pose, nres, saved_ft):
                 rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_LOWER, i)
                 if pose.residue(i+1).has_variant_type(CUTPOINT_UPPER):
                     rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_UPPER, i+1)
+
+# writing PDB 
+def report_pose(pose,tag,extra_score,outsilent,refpose=None,mute=True):
+    # dump to silent
+    if outsilent != None:
+        silentOptions = rosetta.core.io.silent.SilentFileOptions()
+        sfd = rosetta.core.io.silent.SilentFileData(silentOptions)
+        
+        if not mute: print( "Reporting pose to silent %s..."%outsilent )
+        ss = rosetta.core.io.silent.BinarySilentStruct(silentOptions,pose)
+        ss.set_decoy_tag(tag)
+        for (key,val) in extra_score:
+            ss.add_energy(key,val) #add additional info
+
+            if refpose != None:
+                natseq = rosetta.core.sequence.Sequence( refpose.sequence(),"native",1 ) 
+                seq    = rosetta.core.sequence.Sequence( pose.sequence(),"model",1 ) 
+                aln = rosetta.core.sequence.align_naive(seq,natseq)
+                gdtmm = rosetta.protocols.hybridization.get_gdtmm(refpose,pose,aln)
+                ss.add_energy("gdtmm",gdtmm)
+            
+        sfd.write_silent_struct(ss,outsilent)
+    # dump to individual pdb
+    else:
+        if not mute: print( "Reporting pose to pdb %s..."%tag)
+        pose.dump_pdb(tag)

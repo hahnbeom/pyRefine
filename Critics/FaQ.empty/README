@@ -1,0 +1,4 @@
+how to run
+
+source activate tensorflow
+python scripts/ErrorPredictorMSA.py [distogram (*.npz)] [input folder] [output folder]

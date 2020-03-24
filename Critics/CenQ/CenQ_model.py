@@ -37,6 +37,14 @@ class CenQPredictor:
         self.restore_model("%s/models_cenQ.v%d/model.ckpt"%(SCRIPTPATH, ver))
         self.input_generator = InputGenerator()
 
+    def close(self):
+        tf.reset_default_graph()
+        if not self.sess._closed:
+            self.sess.close()
+        #del self.ops
+        #del self.input_generator
+        #del self.sess
+
     def build_graph(self):
         with tf.name_scope('input'): # inputs are aa properties, atom coordinates, distograms
             # AA properties
