@@ -354,23 +354,7 @@ def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False)
 
     # idealize first
     if idealize:
-        poslist = rosetta.utility.vector1_unsigned_long()
-        scorefxn=create_score_function('empty')
-        scorefxn.set_weight(rosetta.core.scoring.cart_bonded, 1.0)
-        scorefxn.score(pose)
-        emap = pose.energies()
-        idealize = rosetta.protocols.idealize.IdealizeMover()
-        if reslist == "auto":
-            for res in range(1,pose.size()+1):
-                cart = emap.residue_total_energy(res)
-                if cart > 50: poslist.append(res)
-        elif isinstance(reslist,list):
-            for res in reslist: poslist.append(res)
-
-        if len(poslist) == 0: return
-
-        idealize.set_pos_list(poslist)
-        idealize.apply(pose)
+        idealize_pose(pose,reslist)
         
     # extend up to upper and lower points
     for resno in range(lower,upper+1):
@@ -380,6 +364,48 @@ def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False)
         pose.set_omega(resno,180.0)
         
     return pose
+
+def idealize_pose(pose,reslist='auto'):
+    poslist = rosetta.utility.vector1_unsigned_long()
+    idealize = rosetta.protocols.idealize.IdealizeMover()
+
+    if reslist == 'auto':
+        scorefxn=create_score_function('empty')
+        scorefxn.set_weight(rosetta.core.scoring.cart_bonded, 1.0)
+        scorefxn.score(pose)
+        emap = pose.energies()
+        for res in range(1,pose.size()+1):
+            cart = emap.residue_total_energy(res)
+            if cart > 50: poslist.append(res)
+    elif isinstance(reslist,list):
+        for res in reslist: poslist.append(res)
+
+    if len(poslist) == 0: return
+
+    idealize.set_pos_list(poslist)
+    idealize.apply(pose)
+
+def restrain_omega(pose,reslist,sig=0.1):
+    for res in reslist:
+        if res == pose.size() or pose.aa(res+1) == rosetta.core.chemical.aa_pro:
+            continue
+        
+        func1 = rosetta.core.scoring.func.CircularHarmonicFunc(3.141592,sig)
+        func2 = rosetta.core.scoring.func.CircularHarmonicFunc(0.0,sig)
+        id1 = rosetta.core.id.AtomID(2,res)   #CA
+        id2 = rosetta.core.id.AtomID(3,res)   #C
+        id3 = rosetta.core.id.AtomID(1,res+1) #N-next
+        id4 = rosetta.core.id.AtomID(2,res+1) #CA-next
+        id5 = rosetta.core.id.AtomID(4,res)   #O
+        id6 = rosetta.core.id.AtomID(pose.residue(res+1).atom_index("H"), res+1) #H-next
+        #cst1 = rosetta.core.scoring.constraints.DihedralConstraint( id1, id2, id3, id4, func1 )
+        #cst2 = rosetta.core.scoring.constraints.DihedralConstraint( id5, id2, id3, id6, func1 )
+        cst3 = rosetta.core.scoring.constraints.DihedralConstraint( id1, id2, id3, id6, func2 ) #ca-c-n-h
+        cst4 = rosetta.core.scoring.constraints.DihedralConstraint( id5, id2, id3, id4, func2 ) #o-c-n-ca
+        #pose.add_constraint( cst1 )
+        #pose.add_constraint( cst2 )
+        pose.add_constraint( cst3 )
+        pose.add_constraint( cst4 )
 
 def R2quat( R ): #input: Rosetta numeric.xyzMatrix
     if R.xx > R.yy and R.xx > R.zz:
@@ -454,24 +480,33 @@ def simple_ft_setup(pose,ulrs):
 
     return [jump[1] for jump in jumpdef], cuts
 
-def reset_fold_tree(pose, nres, saved_ft):
-    pose.conformation().delete_residue_range_slow(nres+1, pose.size())
-    pose.conformation().fold_tree(saved_ft)
+def reset_fold_tree(pose, nres=-1, saved_ft=None, verbose=False):
+    if nres != -1 and pose.size() != nres:
+        pose.conformation().delete_residue_range_slow(nres+1, pose.size())
+    if saved_ft != None:
+        pose.conformation().fold_tree(saved_ft)
 
     from pyrosetta.rosetta.core.chemical import CUTPOINT_LOWER, CUTPOINT_UPPER
+    connected = []
     for i in range(1, pose.size()+1):
         if pose.residue(i).has_variant_type(CUTPOINT_LOWER):
-            is_cut = False
-            for ic in range(1, pose.fold_tree().num_cutpoint()+1):
-                cutpoint = pose.fold_tree().cutpoint(ic)
-                if i == cutpoint:
-                    is_cut = True
-                    break
+            is_cut = False #force connect if no reference ft provided
+            
+            if saved_ft != None: #refer to reference ft
+                for ic in range(1, pose.fold_tree().num_cutpoint()+1):
+                    cutpoint = pose.fold_tree().cutpoint(ic)
+                    if i == cutpoint:
+                        is_cut = True
+                        break
             if not is_cut:
                 pose_changed = True
+                if verbose: print("detected cut at %d"%(i))
                 rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_LOWER, i)
                 if pose.residue(i+1).has_variant_type(CUTPOINT_UPPER):
                     rosetta.core.pose.remove_variant_type_from_pose_residue(pose, CUTPOINT_UPPER, i+1)
+                connected += [i,i+1]
+                if i+2 < pose.size(): connected.append(i+2)
+    return connected
 
 # writing PDB 
 def report_pose(pose,tag,extra_score,outsilent,refpose=None,mute=True):

@@ -8,6 +8,7 @@ import rosetta_utils
 import time
 from numba import cuda
 
+RELAX_TIMELIMIT = 1200 # should take shorter than 20 minutes
 DLPATH='/projects/casp/RefinementScripts/DeepAccNetMSA/latest'
 #ROSETTAPATH=os.environ.get("ROSETTAPATH")
 
@@ -29,7 +30,7 @@ def relax(args):
 
 def relax_multi(ncore,args):
     pdbs_out = [arg[1] for arg in args]
-    
+    time0 = time.time()
     while True:
         if len(args) > 0:
             inpdb,outpdb,relaxscript = args.pop()
@@ -37,7 +38,7 @@ def relax_multi(ncore,args):
             os.system("%s/relax_w_script.sh %s %s %s &"%(MYPATH,inpdb,outpdb,relaxscript))
 
         ndone = len([pdb for pdb in pdbs_out if os.path.exists(pdb)])
-        if ndone == len(pdbs_out):
+        if ndone == len(pdbs_out) or (time.time()-time0) > RELAX_TIMELIMIT:
             break
         time.sleep(1)
         

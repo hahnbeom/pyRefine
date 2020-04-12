@@ -11,7 +11,8 @@ from itertools import zip_longest
 from .Sequence import *
 
 BB_ATOMS = ['N', 'CA', 'C', 'O', 'CB']
-MAX_TOT_RES_ACC   = 180000 # (60^2) * 50: rtx2080 can process 50 decoys having 60aa at same time.
+#MAX_TOT_RES_ACC   = 180000 # (60^2) * 50: rtx2080 can process 50 decoys having 60aa at same time.
+MAX_TOT_RES_ACC   = 100000 
 if "TITAN" in gpu_name:
     MAX_TOT_RES_ACC = MAX_TOT_RES_ACC * 3
 elif "QUADRO" in gpu_name:

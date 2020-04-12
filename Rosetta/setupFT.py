@@ -42,6 +42,8 @@ def arg_parser(argv):
     parser.add_argument('-do_termsearch', dest='do_termsearch', default=False, action="store_true",
                         help="Use TERM db lookup to get variable ULR-SS jump candidates")
 
+    #parser.add_argument('-subdef_confience_offset',
+
     # debugging
     parser.add_argument('-write_pdb', dest='write_pdb', default=False, action="store_true",
                      help='report library as pdb files')
@@ -196,15 +198,17 @@ def main(opt,pose=None,FTnpz=None):
 
     ## Output multiple FT options of ulrs/subs into individual npz
     # a. freeze sub & go through ulrs
+    '''
     for i,ulrs in enumerate(variable_ulr_defs):
         print("======= Generating %s.ulrdef%d.npz..."%(opt.outprefix,i))
         FTInfo.setup_fold_tree(pose,opt,poseinfo,ulrs=ulrs)
         FTInfo.save_as_npz(opt.outprefix+".ulrdef%d.npz"%(i))
+    '''
 
     # b. allow jumps to move, freeze ulr as 
     FTInfo_tmp = copy.copy(FTInfo) #safe???
     FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=FTInfo.ulrs_cons)
-    for i,fQcut in enumerate([0.2,0.3]):
+    for i,fQcut in enumerate([0.2,0.3,0.35,0.4]):
         print("======= Generating %s.jump%d.npz..."%(opt.outprefix,i))
         FTInfo_tmp.save_as_npz(opt.outprefix+".jump%d.npz"%(i),fQcut=fQcut)
 
@@ -215,12 +219,14 @@ def main(opt,pose=None,FTnpz=None):
         FTInfo.save_as_npz(opt.outprefix+".subdef%d.npz"%(i))
 
     # c. randomize jump centers a bit
+    '''
     for i in range(opt.npert_jump_loc):
         print("======= Generating %s.cendef%d.npz..."%(opt.outprefix,i))
         FTInfo_tmp = copy.copy(FTInfo) #safe???
         FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=ulrs,max_pert_jump_loc=3)
         FTInfo_tmp.save_as_npz(opt.outprefix+".cendef%d.npz"%(i))
-        
+    '''
+    
 # check
 def check(opt):
     npzs = glob.glob(opt.outprefix+".cendef?.npz")

@@ -368,14 +368,14 @@ def find_blocks2(g, vs=None, visualize=False, th=0.8):
         outputs.append(subgraph_vs)
     return outputs
 
-def estogram2sub(estogram,SS3,ulrs,opt):
+def estogram2sub(estogram,SS3,ulrs,opt,confcut,out=None):
     x = estogram ##just alias
     x = (x+np.transpose(x, [1,0,2]))/2
     b = binrize_estogram(x, exclude=ulrs, threshold = opt.subdef_conserve)
     nres = len(x)
     MINCONFCUT = 0.5 #lower confidence threshold until this value
 
-    confcut = opt.subdef_confidence
+    #confcut = opt.subdef_confidence
     ncover_min = int(opt.min_coverage*nres)
     covered = [False for k in range(nres)]
 
@@ -430,17 +430,16 @@ def estogram2sub(estogram,SS3,ulrs,opt):
         confcut -= 0.1
 
     if confcut > MINCONFCUT:
-        print( "Convereged at confcut %.2f, coverage/threshold: %4.2f/%4.2f"%(confcut, float(covered.count(True))/nres, float(ncover_min)/nres))
+        print( "Converged at confcut %.2f, coverage/threshold: %4.2f/%4.2f"%(confcut, float(covered.count(True))/nres, float(ncover_min)/nres))
     else:
         print( "Terminated at confcut %.2f, coverage/threshold: %4.2f/%4.2f"%(confcut, float(covered.count(True))/nres, float(ncover_min)/nres))
         
-    if opt.outfile != None:
-        f = open(opt.outfile, "w")
+    if out != None:
         for i,subdef in enumerate(subdefs):
-            f.write("Sub %d: %d chunks\n"%(i,len(subdef)))
+            out.write(" * Sub %d: %d chunks\n"%(i,len(subdef)))
             for j,chunk in enumerate(subdef):
-                f.write("Chunk %d: "%j+" %d-%d\n"%(chunk[0],chunk[-1]))
-        f.close()
+                out.write("  -- chunk %d: "%j+" %d-%d\n"%(chunk[0],chunk[-1]))
+        #out.close()
     return subdefs
 
 # Use this main function for short CAdev/ULR analysis...

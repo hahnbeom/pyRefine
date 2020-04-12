@@ -114,6 +114,7 @@ class Pair:
 
     def estogram2spline(self,maxP_spline_on=0.0,out=None):
         maxP = max(self.Pcorr)
+        #print("??? ", maxP, maxP_spline_on)
         if maxP <= maxP_spline_on: return False
 
         xs = self.d0+DELTA
@@ -287,13 +288,22 @@ def dynamic_Pcore_cut( pairs,cut0,ncore_cut ):
         
     return cut
 
-def apply_on_pose( pose, npz, opt, debug=False, reportf=None ):
+def apply_on_pose( pose, npz, refpose=None, opt=None, debug=False, reportf=None ):
     dat = np.load(npz)
     estogram = dat['estogram']    
     Q = np.mean(dat['lddt'])
-
+    if refpose == None: refpose = pose
+    
+    if opt == None:
+        opt = default_opt( Pcore=[0.6,0.7,0.8],
+                           Pspline_on_fa=0.0, #cen
+                           Pcontact_cut=0.9,
+                           hardcsttype="bounded",
+                           refcorrection_method="statQ",
+                           dynamic_Pcut=False)
+        
     # 1. get list of valid pairs within dcut
-    pairs = find_pairs(pose,estogram,dcut=DCUT_SOFT)
+    pairs = find_pairs(refpose,estogram,dcut=DCUT_SOFT)
 
     # 2. apply reference correction
     do_reference_correction(pairs,estogram,Q,
@@ -306,8 +316,11 @@ def apply_on_pose( pose, npz, opt, debug=False, reportf=None ):
     nres = len(estogram)
     ncore_cut = float(nres)*np.log(float(nres))
 
-    Pcore_cut = dynamic_Pcore_cut( pairs, cut0=opt.Pcore[1], ncore_cut=ncore_cut )
-    print( "Decide Pcore_0 cut as %5.2f"%Pcore_cut )
+    if opt.dynamic_Pcut:
+        Pcore_cut = dynamic_Pcore_cut( pairs, cut0=opt.Pcore[1], ncore_cut=ncore_cut )
+        print( "Decide Pcore_0 cut as %5.2f"%Pcore_cut )
+    else:
+        Pcore_cut = opt.Pcore[1]
 
     # 4. make list of csts
     ncore,nspl,ncont = (0,0,0)
@@ -315,15 +328,17 @@ def apply_on_pose( pose, npz, opt, debug=False, reportf=None ):
         (id1,id2) = p.ids
 
         funcs = []
+        #soft
         if p.d0 <= DCUT_SOFT:
-            funcs.append( p.estogram2spline(maxP_spline_on=opt.Pspline_on_fa,
-                                            out=out) )
-            nspl += 1
-
-            if p.Pcontact > opt.Pcontact_cut and p.Pcen < opt.Pcore[1]:
-                funcs.append( p.estogram2contact(out=out) )
-                ncont += 1
-
+            func = p.estogram2spline(maxP_spline_on=opt.Pspline_on_fa,
+                                     out=out)
+            if func:
+                funcs.append( func )
+                nspl += 1
+                if p.Pcontact > opt.Pcontact_cut and p.Pcen < opt.Pcore[1]:
+                    funcs.append( p.estogram2contact(out=out) )
+                    ncont += 1
+        #hard
         if p.d0 <= DCUT_HARD and p.Pcen >= Pcore_cut:
             funcs += p.estogram2core(functype=opt.hardcsttype,
                                      out=out)

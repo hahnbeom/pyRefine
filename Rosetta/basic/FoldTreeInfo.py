@@ -144,7 +144,8 @@ class FoldTreeInfo:
     # this function defines only ulrs
     def init_from_estogram(self,pose,opt,
                            npz=None,
-                           poseinfo=None):
+                           poseinfo=None,
+                           subdef_confidence_offset="auto"):
         if npz == None: npz = opt.npz
         data = np.load(npz)
         estogram  = data['estogram']
@@ -178,20 +179,28 @@ class FoldTreeInfo:
 
         # 2. Predict subs -- variable sub defs...
         if opt.do_subdef:
-            if opt.subdef_confidence_offset == "auto":
+            if subdef_confidence_offset == "auto":
                 subdef_base = self.Q + 0.1
-            elif isinstance(opt.subdef_confidence_offset,float):
-                subdef_base = self.Q + opt.subdef_confidence_offset
+            elif isinstance(subdef_confidence_offset,float):
+                subdef_base = self.Q + subdef_confidence_offset
 
             if opt.debug: print("\n[FTInfo] ========== SubChunk assignment ========")
+            ulrres = []
+            for ulr in self.ulrs_aggr: ulrres += ulr
+            
             # should have possible connections, not a strict definition
-            for confcut in [subdef_base-0.1,subdef_base,subdef_base+0.1]:
+            for confcut in [subdef_base-0.2,subdef_base-0.1,subdef_base,subdef_base+0.1]:
                 subs = estogram_utils.estogram2sub(estogram,
                                                    poseinfo.SS3_naive,
-                                                   self.ulrres, opt,
-                                                   confcut=confcut)
-                print(confcut,subs)
-                self.subdefs.append(subs)
+                                                   ulrres, #from aggr
+                                                   opt,
+                                                   confcut=confcut,
+                                                   out=sys.stdout)
+                #print(confcut,subs)
+                # append only if at least one sub
+                #print(subs)
+                if len(subs) > 0:
+                    self.subdefs.append(subs)
             
         # Setup fold tree given sub & ulr info -- move outside for variable defs
         #self.setup_fold_tree(pose,opt,poseinfo,ulrs=self.ulrs)
@@ -257,6 +266,11 @@ class FoldTreeInfo:
         ft = pose.conformation().fold_tree().clone()
         jumpdef = [(jump.anchor,jump.cen) for jump in jumps]
         stat = rosetta_utils.tree_from_jumps_and_cuts(ft,self.nres+1,jumpdef,cuts,self.nres+1)
+        if not stat:
+            print("Failed to generate FT from cut/jump def!")
+            print(" - cuts: ", cuts)
+            print(" - jumps (anchor/cen): ", jumpdef)
+            sys.exit()
 
         if not pose.residue(pose.size()).is_virtual_residue(): 
             PR.rosetta.core.pose.addVirtualResAsRoot(pose)
@@ -275,31 +289,58 @@ class FoldTreeInfo:
 
         ## 1. First get which SS belongs to which GraphChunk 
         iSSs_at_sub = [[] for sub in subdef_in]
+        nres_at_sub = [0 for sub in subdef_in]
         for iSS,SS in enumerate(SSs_all[:n_nonulrSS]):
             cenres = SSs_all[iSS].cenres
-            for i,sub in enumerate(subdef_in):
-                iSSs_at_sub[i] += [j for j,chunk in enumerate(sub) if cenres in chunk]
+            for isub,sub in enumerate(subdef_in):
+                SS_at_sub = []#chunk for chunk in sub if cenres in chunk]
+                for chunk in sub:
+                    if cenres in chunk:
+                        iSSs_at_sub[isub].append(iSS)
+                        nres_at_sub[isub] += SS.nres
+                    #print("isub %d: SS_at_sub around %d"%(isub,cenres))
 
+        master_sub = -1 #unused if remains as is
+        if len(nres_at_sub) > 0:
+            master_sub = np.argmax(nres_at_sub)
+        
         # Re-define master having the longest length -- forget "j==0" (original designation by estogram2sub)
-        sub_redef = [-1 for SS in SSs_all] # -1 as master
+        sub_redef = [-1 for SS in SSs_all] # -1 == vroot
         for isub,iSSs in enumerate(iSSs_at_sub):
             if len(iSSs) <= 1: continue # treat as regular
-            imaster = np.argmax([SSs_all[iSS].nres for iSS in iSSs])
+            imaster = iSSs[np.argmax([SSs_all[iSS].nres for iSS in iSSs])]
             for iSS in iSSs:
-                if iSS != imaster: sub_redef[iSS] = imaster #rest as branch
-                    
+                if iSS == imaster:
+                    if isub == master_sub:
+                        sub_redef[iSS] = -2 # master of sub0 -- freeze
+                    else:
+                        sub_redef[iSS] = -1
+                else:
+                    sub_redef[iSS] = imaster #rest as branch
+            
         ## 2. Define jumps: scan through SS
         jumps = []
         for iSS,SS in enumerate(SSs_all):
             j = sub_redef[iSS] #master iSS index
-            if j == -1: anc = self.nres+1             #MasterChunk
-            else:       anc = SSs_all[j].cenres #BranchChunk
-            movable = (anc != self.nres+1) #unused here....
+            if j < 0: anc = self.nres+1             #MasterChunk
+            else:     anc = SSs_all[j].cenres #BranchChunk
+            movable = (anc == self.nres+1) and (j==-1) #unused here....
             jump = Jump(anc,SS.cenres,SS.reslist,movable=movable,is_ULR=(iSS >= n_nonulrSS))
 
+            extra = ""
+            if movable:
+                extra = " Movable"
+            elif j == -2: extra = " Master"
+            elif anc != self.nres+1:
+                if len(iSSs_at_sub) > 0 and (iSS in iSSs_at_sub[0]):
+                    extra = " master-dependent"
+                else:
+                    extra = " movable-dependent"
+
             Qjump = np.mean(self.Qres[jump.reslist[0]-1:jump.reslist[1]])
-            print("Jump %d (%3d-%3d), %3d-> %3d, Qconf %5.3f"%(len(jumps),SS.begin,SS.end,
-                                                               SS.cenres,anc,Qjump))
+            print("Jump %d (%3d-%3d), %3d-> %3d, Qconf %5.3f %s"%(len(jumps),SS.begin,SS.end,
+                                                                  SS.cenres,anc,Qjump,
+                                                                  extra))
             jump.ijump = len(jumps) #necessary?
             jumps.append(jump)
 
@@ -316,8 +357,6 @@ class FoldTreeInfo:
             cuts = [jumpres[i+1][0] for i,reslist in enumerate(jumpres[:-1])]
             
         cuts.append(self.nres)
-        print(cuts, len(cuts), len(jumps))
-
         return cuts,jumps
         
     ## UNUSED: manual
@@ -329,13 +368,14 @@ class FoldTreeInfo:
 
         jumps = []
         cuts = []
-        for sub in subs:
+        for isub,sub in enumerate(subs):
             for i,chunk in enumerate(sub):
                 chunkcen = get_COMres(pose,chunk)
                 cuts.append(chunk[-1])
                 if i == 0:
                     ancres = chunkcen
-                    jumps.append(Jump(self.nres+1,chunkcen,chunk,False)) #place jump at central res to vroot
+                    # anc,cen,range,movable
+                    jumps.append(Jump(self.nres+1,chunkcen,chunk,isub>0)) #place jump at central res to vroot
                 else:
                     jumps.append(Jump(ancres,chunkcen,chunk,True)) #place jump at central res to sub-anchor
                 
@@ -356,7 +396,9 @@ class FoldTreeInfo:
         nres =  self.cuts[-1] #safe?
 
         # get estimation of Q at jumpSSs
+        jumpmove_by_Q = False
         if fQcut != -1.0 and Qcut_for_movable_jump < 0:
+            jumpmove_by_Q = True
             Q_SS = []
             for jump in self.jumps: Q_SS += list(self.Qres[jump.reslist[0]-1:jump.reslist[-1]])
             Q_SS.sort()
@@ -369,7 +411,10 @@ class FoldTreeInfo:
             jump = self.jumps[i] # SS<->jump match?
             Qjump = np.mean(self.Qres[jump.reslist[0]-1:jump.reslist[-1]])
             # by default don't move
-            movable = (jump.anchor==nres+1) and (Qjump<Qcut_for_movable_jump)
+            if jumpmove_by_Q:
+                movable = (jump.anchor==nres+1) and (Qjump<Qcut_for_movable_jump)
+            else:
+                movable = jump.movable 
             jumpinfo[i] = np.array([SS.begin,SS.end,self.cuts[i],jump.cen,jump.anchor,
                                     0,movable],dtype=int)
             
@@ -387,8 +432,8 @@ class FoldTreeInfo:
                 ulrstubs[ij]['anchor'] = jump.stub_anc_np
                 ulrstubs[ij]['ulr']    = [moveset.stub_SS_np for moveset in jump.movesets]
 
-        print("Movable jumps: ", [i for i,jumpinfo in enumerate(jumpinfo) if jumpinfo[6]]) 
-            
+        print("Movable jumps: ", [i for i,jump in enumerate(jumpinfo) if jump[6]]) 
+
         np.savez(outf,
                  Qres=self.Qres,
                  Qres_corr=self.Qres_corr,

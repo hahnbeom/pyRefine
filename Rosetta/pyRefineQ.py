@@ -71,6 +71,11 @@ def arg_parser(argv):
     opt.add_argument('-cen_cst_w', dest='cen_cst_w', type=float, default=1.0, help='')
     opt.add_argument('-fa_cst_w', dest='fa_cst_w', type=float, default=1.0, help='')
     opt.add_argument('-refcorrection_method', dest='refcorrection_method', default="none", help='')
+    opt.add_argument('-Pspline_on_fa', type=float, default=0.3, help="Lower bound of max(P) applying splineas cst") 
+    opt.add_argument('-hardcsttype', default="sigmoid", help="functional form of core restraints")
+    opt.add_argument('-dynamic_Pcut', default=False, action="store_true", \
+                     help="apply dynamic Pcore cut to cover sufficient num. pairs")
+    opt.add_argument('-Pcore', default=0.8, type=float, help="estogram confident pair starting Pcen") 
     opt.add_argument('-dist', dest='dist', default=None, help='Outcome of trRosetta in npz format which contains predicted distogram. It should be provided if you use Q as score')
 
     ## Macro cycle options
@@ -79,8 +84,8 @@ def arg_parser(argv):
     
     ###### Sampling options
     ### Scheduling
-    #opt.add_argument('-nstep_anneal', type=int, default=20,
-    #                 help='num. steps for each AnnealQ runs') #deprecated
+    opt.add_argument('-nstep_anneal', dest="nstep_anneal", type=int, default=15,
+                     help='num. steps for each AnnealQ runs') #deprecated
     opt.add_argument('-nmacro', type=int, default=1,
                      help='num. steps for macro cycles')
     ### relative weights
@@ -163,6 +168,7 @@ def arg_parser(argv):
     params.ulrs = []
     for i,ulrstr in enumerate(params.ulr_s):
         params.ulrs.append( list(range( int(ulrstr.split('-')[0]), int(ulrstr.split('-')[-1])+1 )) )
+    params.Pcore = [params.Pcore,params.Pcore,params.Pcore+0.1]
 
     # check if any 
     check_opt_consistency(params)
@@ -202,6 +208,7 @@ class Scheduler:
         # leave it undefined unless overloaded below
         self.wQ = []
         self.wdssp = [] 
+        self.nstep_anneal = opt.nstep_anneal
 
         if do_Qopt:
             print("Scheduler: Loading Qanneal dflt schedule.")
@@ -231,7 +238,7 @@ class Scheduler:
 
     def load_Qanneal_sch(self):
         #pert/insert/refine/closure
-        self.niter = [  10,  15,   5,  10] #pert/Qanneal/Qrefine/closure
+        self.niter = [  10,  self.nstep_anneal,   5,  10] #pert/Qanneal/Qrefine/closure
         #self.niter = [   10,   0,   0,  10] #DEBUG
         self.kT    = [  0.0, 0.0, 0.0, 1.0]
         #these values are scales wrt input wts
@@ -306,11 +313,15 @@ class Annealer:
             self.opt.scoretype = "Q"
 
         if self.opt.cen_cst.endswith('npz'): # from DL
-            self.opt.Pcore = [0.8,0.8,0.9] # 
-            self.opt.hardcsttype="sigmoid" #soft for only very confident ones 
-            self.opt.Pspline_on_fa=0.3 #==throw away if maxP in estogram lower than this val
             self.opt.Pcontact_cut =1.1 #==None
-            self.refcorrection_method="statQ"
+            self.opt.refcorrection_method="none"  #"statQ"
+            # below: through input arg
+            #self.opt.Pcore = [0.8,0.8,0.9] # 
+            #self.opt.dynamic_Pcut = False
+            #self.opt.hardcsttype="sigmoid" #soft for only very confident ones
+            #self.opt.Pspline_on_fa=0.3 #==throw away if maxP in estogram lower than this val
+
+            # refpose == pose0
             estogram2cst.apply_on_pose( pose,npz=self.opt.cen_cst,
                                         opt=self.opt )
             
@@ -436,6 +447,11 @@ class Runner:
                                            runno=0,
                                            report_trj="%s.trj.cen.out"%self.opt.prefix)
 
+            if self.opt.cen_only:
+                print("Skip all-atom stage as -cen_only option provided.")
+                pose_min = poses_out[-1]
+                continue
+            
             # hack to speed up relax
             print("Call FaQRunner...")
             AAscorer.apply(poses_out,'%s/%s'%(os.getcwd(),self.opt.dist),
