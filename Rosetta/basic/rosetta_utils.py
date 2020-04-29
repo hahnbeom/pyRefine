@@ -138,26 +138,33 @@ def extraSS_from_prediction(regions,SS3pred,mask_in=None,report=True,minlen=5):
             SSreg = list(range(ni,ni+len(part)))
             # check if overlaps with already claimed res
             overlap = [res for res in SSreg if res in mask_in] #0-index
-            if overlap != []: continue
+            if overlap != []:
+                ni += len(part)
+                continue
             
             mask = [i+1 for i in range(len(SS3pred)) if (SS3pred[i] in ['H','E'] and i+1 not in reg)]
 
             if (SStype == 'E' and len(part) >= 3) or (SStype == 'H' and len(part) >= 7):
+                # be permissive to get more anchors!
                 if len(SSreg) <= minlen:
                     res1,res2 = try_SS_extension_by_prediction(SSreg,SS3pred,mask,SStype,
-                                                               allow_coil=True)
-                    if res2-res1 < 4: continue #skip if cannot be extended to 5-residues (for frame definition) 
-                    SSreg = list(range(res1,res2+1))
-                    
-                extraSSs.append( SSreg )
-                SStypes.append(SStype)
-                if report: print("SS-ULR fromPred: %3d-%3d, type=%s"%(SSreg[0],SSreg[-1],SStype))
+                                                               allow_coil=True,maxext=2)
+                    if res2-res1 >= 4:
+                        SSreg = list(range(res1,res2+1))
+                        print("extend:", SSreg)
+
+                #skip if cannot be extended to 5-residues (for frame definition) 
+                if len(SSreg) >= 5:
+                    extraSSs.append( SSreg )
+                    SStypes.append(SStype)
+                    if report: print("SS-ULR fromPred: %3d-%3d, type=%s"%(SSreg[0],SSreg[-1],SStype))
             ni += len(part)
             
     return extraSSs, SStypes
 
 def try_SS_extension_by_prediction(reg_org,pred,mask,SStype,
-                                   allow_coil=False,maxext=3):
+                                   allow_coil=False,maxext=3
+                                   ):
     # pred is 0-index, others are 1-index -- nasty...
     
     # extend to Nterm
@@ -182,7 +189,7 @@ def SS9p_to_SS3type(SS9p):
     #(0: B, 1: E, 2: U, 3: G, 4: H, 5: I, 6: S, 7: T, 8: C); U beta-bulge
     SS3type = []
     for p in SS9p:
-        pSS3 = [sum(p[0:3]), sum(p[3:6]), sum(p[6:-1])] #E,H,C;
+        pSS3 = [sum(p[0:3]), sum(p[3:6]), sum(p[6:])] #E,H,C;
         if np.argmax(pSS3) == 1:
             SS3type.append('H')
         elif np.argmax(pSS3) == 0:
@@ -327,7 +334,8 @@ def pose2dmtrx(pose):
             d0mtrx[j-1][i-1] = d0mtrx[i-1][j-1]
     return d0mtrx
 
-def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False):
+#def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False):
+def local_extend(nres,extended_mask,reslist="auto",stoppoints=[]):
     # extend to cutpoints
     if isinstance(reslist,list):
         # get upper- & lower- cut point
@@ -345,13 +353,17 @@ def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False)
             if lower != 1: lower = min(reslist) #do not extend towards N- unless N-terminus ULR
                 
             while True:
-                if upper+1 > pose.size() or upper+1 in stoppoints: break
+                if upper+1 > nres or upper+1 in stoppoints: break
                 upper += 1
             #if upper == pose.size(): upper = max(reslist) # do not extend towards C if C-term
             
         print("Extend %d:%d -> %d:%d"%(min(reslist),max(reslist),lower,upper))
         reslist = list(range(lower,upper))
 
+    for resno in range(lower,upper+1):
+        extended_mask[resno-1] = True #0-index
+
+    '''
     # idealize first
     if idealize:
         idealize_pose(pose,reslist)
@@ -362,8 +374,8 @@ def local_extend(pose,extended_mask,reslist="auto",stoppoints=[],idealize=False)
         pose.set_phi(resno,-135.0)
         pose.set_psi(resno, 135.0)
         pose.set_omega(resno,180.0)
-        
     return pose
+    '''
 
 def idealize_pose(pose,reslist='auto'):
     poslist = rosetta.utility.vector1_unsigned_long()
@@ -448,7 +460,7 @@ def simple_ft_setup(pose,ulrs):
     for ulr in ulrs: ulrres += ulr
     print("ULR: ", ulrres )
     
-    SSs, SS3type = rosetta_utils.pose2SSs(pose,ulrres)
+    SSs, SS3type = pose2SSs(pose,ulrres)
 
     jumpdef = []
     cuts = []
@@ -466,7 +478,7 @@ def simple_ft_setup(pose,ulrs):
     print( "JUMPS: ", jumpdef )
         
     ft = pose.conformation().fold_tree().clone()
-    stat = rosetta_utils.tree_from_jumps_and_cuts(ft,nres+1,jumpdef,cuts,nres+1)
+    stat = tree_from_jumps_and_cuts(ft,nres+1,jumpdef,cuts,nres+1)
 
     if not pose.residue(pose.size()).is_virtual_residue(): 
         rosetta.core.pose.addVirtualResAsRoot(pose)

@@ -44,6 +44,7 @@ class Pair:
         self.d0 = d0
         self.Pcen = sum(estogram[kCEN-1:kCEN+2])
         self.seqsep = abs(id1.rsd()-id2.rsd())
+        self.is_ulr = False
 
     def P_dfire(self): #no reference prob
         Pcorr = copy.deepcopy(self.estogram)
@@ -247,7 +248,7 @@ def do_reference_correction(pairs,estogram,Q,opt='statQ'):
             
 #####################################################
             
-def find_pairs(pose,estogram,dcut=35.0):
+def find_pairs(pose,estogram,mask,dcut=35.0):
     nres = len(estogram)
 
     pairs = []
@@ -260,6 +261,7 @@ def find_pairs(pose,estogram,dcut=35.0):
         for j in range(i+4,nres):
             if pose.residue(j+1).has('CB'): atm_j = 'CB'
             else: atm_j = 'CA'
+            
             atm_j = pose.residue(j+1).atom_index(atm_j)
             id2 = PR.rosetta.core.id.AtomID(atm_j,j+1)
 
@@ -270,7 +272,9 @@ def find_pairs(pose,estogram,dcut=35.0):
             if d0 > dcut: continue
 
             p = Pair(estogram[i][j],id1,id2,d0)
+            p.is_ulr = (i+1 in mask or j+1 in mask)
             pairs.append(p)
+            
     return pairs
 
 # To regularize super-hard cases
@@ -288,7 +292,9 @@ def dynamic_Pcore_cut( pairs,cut0,ncore_cut ):
         
     return cut
 
-def apply_on_pose( pose, npz, refpose=None, opt=None, debug=False, reportf=None ):
+def apply_on_pose( pose, npz, refpose=None, opt=None,
+                   mask=[],
+                   debug=False, reportf=None ):
     dat = np.load(npz)
     estogram = dat['estogram']    
     Q = np.mean(dat['lddt'])
@@ -303,7 +309,7 @@ def apply_on_pose( pose, npz, refpose=None, opt=None, debug=False, reportf=None 
                            dynamic_Pcut=False)
         
     # 1. get list of valid pairs within dcut
-    pairs = find_pairs(refpose,estogram,dcut=DCUT_SOFT)
+    pairs = find_pairs(refpose,estogram,mask,dcut=DCUT_SOFT)
 
     # 2. apply reference correction
     do_reference_correction(pairs,estogram,Q,
@@ -339,7 +345,7 @@ def apply_on_pose( pose, npz, refpose=None, opt=None, debug=False, reportf=None 
                     funcs.append( p.estogram2contact(out=out) )
                     ncont += 1
         #hard
-        if p.d0 <= DCUT_HARD and p.Pcen >= Pcore_cut:
+        if p.d0 <= DCUT_HARD and p.Pcen >= Pcore_cut and not p.is_ulr:
             funcs += p.estogram2core(functype=opt.hardcsttype,
                                      out=out)
             ncore += 1

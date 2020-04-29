@@ -216,7 +216,9 @@ class PoseInfo:
         self.SSs = []
 
         # make non-coil & >= 3res 
-        SSparts = myutils.list2part(self.SS3_naive)
+        SSparts = myutils.list2part(self.SS3_naive) #[[E,E,E],[L,L,L],...]
+        #if opt.nloop_SSconnect > 0: #connect if 
+        #    SSparts = myutils.connect_SS(SSparts,'L',opt.nloop_SSconnect)
         SSmask = [] # already claimed
         i1 = 1
         for part in SSparts:
@@ -248,10 +250,11 @@ class PoseInfo:
             i1 += len(part) #self.SSs[-1].nres #???? CHECK
 
     # Version using prediction
-    def try_SS_extension_by_prediction(self,SSseg,SSmask):
+    def try_SS_extension_by_prediction(self,SSseg,SSmask,permissive=False):
         reg = SSseg.reslist
         res1,res2 = rosetta_utils.try_SS_extension_by_prediction(reg, self.SS3_pred, SSmask,
-                                                                 SSseg.SStype)
+                                                                 SSseg.SStype,
+                                                                 allow_coil=permissive)
         return SSclass( SSseg.SStype, res1, res2, poseinfo=self, cenpos='com' )
 
     # UNUSED
@@ -319,7 +322,7 @@ class PoseInfo:
                 dot2 = abs(np.dot(SS2.axes[1],vcom))
                 dot3 = abs(np.dot(SS1.axes[1],SS2.axes[1]))
                 # should not align on top of each other ( cos(30deg) = 0.866 )
-                if dot1 > 0.866 and dot2 > 0.866: continue
+                #if dot1 > 0.866 and dot2 > 0.866: continue
                 #if dot3 < 0.866: continue 
 
                 self.SSpairs.append((iSS,jSS))
@@ -373,6 +376,7 @@ class PoseInfo:
         # 1-anchorSS case
         for iSS in SSs:
             SS = self.SSs[iSS]
+            
             for i in range(SS.nres-wsize+1):
                 i1 = i
                 i2 = i+wsize-1
@@ -395,6 +399,7 @@ class PoseInfo:
                             if report:
                                 print( '---  chunk %d-%d not usable as a register because of both-paired res %d'%(SS.begin+i1,SS.begin+i2,SS.begin+ires) )
                             break
+                #print(SS.begin+i1,SS.begin+i2,usable)
                 if not usable: continue
 
                 SS_w = SS.make_subSS(i1,i2) #not resno, index no within fullSS
@@ -433,6 +438,9 @@ class PoseInfo:
         # 1. get list of not super great SS/SSpair list
         # Exclude ULR from the anchor list
         masked_cen = [ ulrSS.cenres for ulrSS in ULRSSs]
+        masked_res = []
+        for ulr in ULRSSs: masked_res += ulr.reslist
+        self.set_unpaired_if_masked(masked_res)
         
         unpaired_oneE,unpaired_twoE = self.find_unpaired_anchors(['E','EE'],
                                                                  maskedres=masked_cen,
@@ -476,6 +484,12 @@ class PoseInfo:
             if SScomb.count('E') >= 2: anchors += self.SSanchors['EE']
             
         return anchors
+
+    def set_unpaired_if_masked(self,masked_res):
+        for iSS,SS in enumerate(self.SSs):
+            for i in range(SS.nres):
+                if i not in SS.paired_res: continue
+                SS.paired_res[i] = [j for j in SS.paired_res[i] if j not in masked_res]
     
     def find_unpaired_anchors(self,allowed_anchor_SStypes,
                               maskedres=[],
@@ -483,10 +497,29 @@ class PoseInfo:
         unpaired_one = []
         unpaired_two = []
 
-        # first get num SSpair-of-interest (e.g. EE) 
+        # rewrite!!!
+        # first find contigous region unpaired for each SS
+        for iSS,SS in enumerate(self.SSs):
+            if SS.SStype not in allowed_anchor_SStypes: continue
+            if SS.cenres in maskedres: continue
+            unpaired = []
+            for i in range(SS.nres):
+                if i not in SS.paired_res or len(SS.paired_res[i]) < 2:
+                    unpaired.append(True)
+                else:
+                    unpaired.append(False)
+
+            has_unpaired_con = False
+            for k in range(SS.nres-2):
+                if(unpaired[k] and unpaired[k+1] and unpaired[k+2]):
+                    has_unpaired_con = True
+                    break
+            if has_unpaired_con: unpaired_one.append(iSS)
+            
+        # OLD logic: first get num SSpair-of-interest (e.g. EE)
+        '''
         npairs = {}
         for iSS,SS in enumerate(self.SSs): npairs[iSS] = 0
-            
         for (iSS1,iSS2) in self.SSpairs:
             SS1 = self.SSs[iSS1]
             SS2 = self.SSs[iSS2]
@@ -498,13 +531,15 @@ class PoseInfo:
             if SS.SStype not in allowed_anchor_SStypes: continue
             if SS.contains(maskedres): continue
             if npairs[iSS] < 2: unpaired_one.append(iSS)
+        '''
                 
         for (iSS1,iSS2) in self.SSpairs:
             SS1 = self.SSs[iSS1]
             SS2 = self.SSs[iSS2]
             if SS1.SStype+SS2.SStype not in allowed_anchor_SStypes: continue
             if SS1.contains(maskedres) or SS2.contains(maskedres): continue
-            if npairs[iSS1] < 2 or npairs[iSS2] < 2:
+            #if npairs[iSS1] < 2 or npairs[iSS2] < 2:
+            if iSS1 in unpaired_one or iSS2 in unpaired_one:
                 unpaired_two.append((iSS1,iSS2))
                 
         return unpaired_one, unpaired_two

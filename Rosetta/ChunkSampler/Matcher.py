@@ -23,13 +23,14 @@ class Matcher:
                              include_hydrophobic=0):
         self.solutions = []
         for i,anchor in enumerate(anchors):
-            if not self.is_ulr_placeable_at_anchor(poseinfo,anchor,
-                                                   ulr_t.reslist):
+            stat = self.is_ulr_placeable_at_anchor(poseinfo,anchor,
+                                                   ulr_t.reslist)
+            if not stat:
                 continue
             self.solutions += self.find_matches_through_DB(poseinfo,anchor,ulr_t)
 
         # need "self".solutions?
-        return self.solutions
+        return self.solutions 
 
     def is_ulr_placeable_at_anchor(self,poseinfo,anchor,ulrres):
         #first check if ULRseq overlapps with jump -- necessary?
@@ -40,7 +41,7 @@ class Matcher:
         
         anccrd1 = []
         anccrd2 = []
-        dperres = 3.0
+        dperres = 3.5
         if ulrres[0]-poseinfo.reslist[0] > 3: #ulr not Nterm
             anccrd1 = poseinfo.CAcrds[ulrres[0]]
         if poseinfo.reslist[-1]-ulrres[-1] > 3: #ulr not Cterm
@@ -97,7 +98,7 @@ class Matcher:
             
             # first get aligned crds
             term.transrot_bbcrd()
-            #term.write_as_pdb("match.%d."%i+term.tag+"pdb")
+            #term.write_as_pdb("match.%d."%i+term.tag+".pdb")
             
             # match SS.reslist to pose
             stat = term.redefine_resrange(query,poseinfo.reslist,
@@ -134,8 +135,8 @@ class Matcher:
             #term.write_as_pdb("legit.%s.pdb"%term.tag) #debugging
             filtered.append(term)
 
-        l = " - filtered %d/%d/%d/%d by mismatch/clash/redundancy/closure: %d->%d (%d threads)"
-        print(l%(nmismatch,nclash,nredundant,nclosure,len(solutions),len(filtered),nthreads))
+        l = " Anchor %12s, - filtered %d/%d/%d/%d by mismatch/clash/redundancy/closure: %d->%d (%d threads)"
+        print(l%(anchortag,nmismatch,nclash,nredundant,nclosure,len(solutions),len(filtered),nthreads))
         return filtered
 
     # rmsd without superposition
@@ -154,18 +155,19 @@ class Matcher:
         threads = []
 
         # first find stem regions
+        # poseinfo.extended_mask?
         stemN,stemC = (SS.reslist[0],SS.reslist[-1])
         while True:
             if stemN-1 < 0 or not poseinfo.extended_mask[stemN-2]: break #0-index
-            #if stemN-1 < 0 or poseinfo.res_in_SSseg(stemN-1): break
+            #if stemN-1 < 0: break
             stemN -= 1
             
         while True:
             if stemC >= len(poseinfo.SS3_naive) or not poseinfo.extended_mask[stemC]: break
-            #if stemC >= len(poseinfo.SS3_naive) or poseinfo.res_in_SSseg(stemC+1): break
+            #if stemC >= len(poseinfo.SS3_naive): break
             stemC += 1
-        #print("extend stem from %d/%d to %d/%d"%(SS.reslist[0],SS.reslist[-1],stemN,stemC))
-        
+
+        # measure fixed distance b/w stem & TERM cen
         if stemN > 1:
             xyzN_stem = poseinfo.CAcrds[stemN-1] #0-index
             dN2 = np.sum((xyzN_stem-SS.CAcrds_al[0])*(xyzN_stem-SS.CAcrds_al[0]))
@@ -177,23 +179,28 @@ class Matcher:
             dC2 = np.sum((xyzC_stem-SS.CAcrds_al[-1])*(xyzC_stem-SS.CAcrds_al[-1]))
         else:
             dC2 = -1 #C-term
+
+        #print("stem?", stemN, stemC, SS.reslist)
         
-        #scan through cenpos 
+        #scan through options of cenpos 
         half = int(len(SS.frame)/2)
         for cenpos in range(half,SS.nres-half):
             if dN2 > 0: #check N-
-                max_d2_to_stem = ((cenpos-half)*3.8)**2 + 9.0 # 3 Ang tolerance
+                nres2N = SS.reslist[cenpos]-stemN
+                max_d2_to_stem = ((nres2N+abs(cenpos-half))*3.6)**2 
                 #print("threadN cen/n/d/cut: %3d %3d %5.2f %5.2f"%(cenpos,cenpos-half,
-                #                                                  np.sqrt(dN2),np.sqrt(max_d2_to_stem)) )
+                #np.sqrt(dN2),np.sqrt(max_d2_to_stem)) )
                 if dN2 > max_d2_to_stem: continue #skip this one
             
             if dC2 > 0: #check C-
-                max_d2_to_stem = ((SS.nres-cenpos-1)*3.8)**2 + 9.0 # 3 Ang tolerance
+                nres2N = stemC-SS.reslist[cenpos]
+                max_d2_to_stem = ((nres2N+abs(SS.nres-cenpos-1))*3.6)**2 
+                #max_d2_to_stem = ((SS.nres-cenpos-1)*3.8)**2 + 9.0 # 3 Ang tolerance
                 #print("threadC cen/n/d/cut: %3d %3d %5.2f %5.2f"%(cenpos,cenpos-half,
-                #                                                  np.sqrt(dC2),np.sqrt(max_d2_to_stem)) )
+                #np.sqrt(dC2),np.sqrt(max_d2_to_stem)) )
                 if dC2 > max_d2_to_stem: continue #skip this one
 
-            # Then filter by rmsd-to-init -- look at N+1 to C-1
+            # If refinemode, filter by rmsd-to-init -- look at N+1 to C-1
             pose_crd   = poseinfo.CAcrds[SS.cenres-half+1:SS.cenres+half]
             thread_crd = SS.CAcrds_al[cenpos-half+1:cenpos+half]
             dcrd = pose_crd-thread_crd

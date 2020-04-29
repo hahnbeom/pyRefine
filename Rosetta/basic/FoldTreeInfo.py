@@ -15,16 +15,19 @@ class JumpMove:
         self.stub_SS_np = []
     
 class Jump:
-    def __init__(self,anchor,cen,reslist,movable=True,is_ULR=False):
+    def __init__(self,anchor,cen,reslist,movable=True,is_ULR=False,ijump=-1,Q=0.0):
         self.anchor = anchor
         self.cen = cen
         self.movable = movable
         self.reslist = list(reslist)
+        self.nres = len(reslist)
         self.is_ULR = is_ULR
+        self.Q = Q
         
-        # default movement magnitude
+        # default movement magnitude -- unused
         self.trans = 1.0
         self.rot = 5.0
+        self.ijump = ijump
 
         # moveset related
         self.movesets = []
@@ -62,26 +65,25 @@ class Jump:
 
         solutionSS = solution.SSs[iSS] #support only 1 SS for now...
         
-        xyz_n  = pose.residue(1).xyz("N") #placeholder
-        xyz_ca = pose.residue(1).xyz("CA")#placeholder 
-        xyz_cp = pose.residue(1).xyz("C") #placeholder
-        
         # Define jump from stubs: solutionSS.cenres  == self.cen??
         for cenpos in threadable_cenpos:
-            shift = cenpos - solutionSS.cenpos
-            
             moveset = JumpMove(tag=solution.tag+".t%02d"%(cenpos))
+
+            xyz_n  = PR.rosetta.numeric.xyzVector_double_t(0.0)
+            xyz_ca = PR.rosetta.numeric.xyzVector_double_t(0.0)
+            xyz_cp = PR.rosetta.numeric.xyzVector_double_t(0.0)
             for k in range(3):
-                xyz_n[k]  = solutionSS.bbcrds_al[cenpos][0][k]
                 xyz_ca[k] = solutionSS.bbcrds_al[cenpos][1][k]
+                xyz_n[k]  = solutionSS.bbcrds_al[cenpos][0][k]
                 xyz_cp[k] = solutionSS.bbcrds_al[cenpos-1][2][k]
                 
             moveset.stub_SS    = PR.rosetta.core.kinematics.Stub(xyz_ca,xyz_n,xyz_cp)
-            moveset.stub_SS_np = np.array([solutionSS.bbcrds_al[cenpos][0],
-                                           solutionSS.bbcrds_al[cenpos][1],
-                                           solutionSS.bbcrds_al[cenpos-1][2]])
+            moveset.stub_SS_np = np.array([solutionSS.bbcrds_al[cenpos][1], #CA
+                                           solutionSS.bbcrds_al[cenpos][0], #N 
+                                           solutionSS.bbcrds_al[cenpos-1][2]]) #Cprv
 
             moveset.tors = {}
+            shift = cenpos - solutionSS.cenpos
             for ires in range(solutionSS.nres):
                 resno = solutionSS.begin + ires + shift
                 if resno > 0 and resno < pose.size():
@@ -89,27 +91,37 @@ class Jump:
                 
             self.movesets.append(moveset)
 
-    def moveset_to_pose(self,pose_in,mode='random',report_pdb=False):
+    def moveset_to_pose(self,pose_in,mode='random',report_pdb=False,nmax=100):
         if mode == 'random':
             movesets = [random.choice(self.movesets)]
         elif mode == 'all':
             movesets = self.movesets
 
         poses = []
+        restags = []
         for moveset in movesets:
-            pose = pose_in #copy
-
-            newjump = PR.rosetta.core.kinematics.Jump(self.stub_anc,moveset.stub_SS)
+            pose = pose_in.clone() #copy
+            # make sure C-term is vroot
+            vroot = pose.residue(pose.size())
+            if not vroot.is_virtual_residue():
+                print("Vroot not found!! continue")
+            stub_anc = PR.rosetta.core.kinematics.Stub(vroot.xyz("ORIG"),vroot.xyz("X"),vroot.xyz("Y"))
+            
+            newjump = PR.rosetta.core.kinematics.Jump(stub_anc,moveset.stub_SS)
             pose.conformation().set_jump(self.ijump+1,newjump) #ijump is 0-index
 
+            # write tors from TERM
             for resno in moveset.tors:
                 phi,psi,omg = moveset.tors[resno]
                 if abs(phi) < 360.0: pose.set_phi(resno,phi)
                 if abs(psi) < 360.0: pose.set_psi(resno,psi)
                 if abs(omg) < 360.0: pose.set_omega(resno,omg)
             poses.append(pose)
+            restags.append(moveset.tors.keys())
             if report_pdb: pose.dump_pdb(moveset.tag+".pdb")
-        return poses
+            if len(poses) >= nmax: break
+            
+        return poses,restags
 
 class FoldTreeInfo:
     def __init__(self,pose,opt): 
@@ -125,7 +137,14 @@ class FoldTreeInfo:
             self.nres = pose.size()
             if pose.residue(self.nres).is_virtual_residue(): self.nres -= 1
 
+        self.allow_beta_jump = False
+        if hasattr(opt,"allow_beta_jump"):
+            self.allow_beta_jump = opt.allow_beta_jump
+
         self.subdefs = []
+        self.cuttype = 'end'
+        if hasattr(opt,"cut_at_mid"):
+            if getattr(opt,"cut_at_mid"): self.cuttype = 'mid'
 
         ## Info being stored/retrieved
            
@@ -140,6 +159,9 @@ class FoldTreeInfo:
         self.SSs_reg = []
         self.SSs_ulr = []
         self.ulrs = []
+        self.ulrs_aggr = []
+        self.ulrs_cons = []
+        self.stub_anc_np = None
 
     # this function defines only ulrs
     def init_from_estogram(self,pose,opt,
@@ -257,8 +279,7 @@ class FoldTreeInfo:
         # iii) define self.jumps & self.cuts that can be translated to Rosetta jump def
         cuts,jumps = self.setup_fold_tree_from_SS(subdef_in=subdef_in,
                                                   SSs_ulr=self.SSs_ulr,
-                                                  report=opt.debug,
-                                                  cut_at_mid=opt.cut_at_mid)
+                                                  report=opt.debug)
         self.cuts = cuts   # cache
         self.jumps = jumps # cache
         
@@ -277,10 +298,17 @@ class FoldTreeInfo:
 
         PR.rosetta.core.pose.symmetry.set_asymm_unit_fold_tree( pose, ft )
         PR.rosetta.protocols.loops.add_cutpoint_variants( pose )
+
+        # store vroot
+        vroot = pose.residue(pose.size())
+        self.stub_anc_np = np.array([[vroot.xyz("ORIG")[0],vroot.xyz("ORIG")[1],vroot.xyz("ORIG")[2]],
+                                     [vroot.xyz("X")[0]   ,vroot.xyz("X")[1]   ,vroot.xyz("X")[2]],
+                                     [vroot.xyz("Y")[0]   ,vroot.xyz("Y")[1]   ,vroot.xyz("Y")[2]]])
+        
         
     ### Use self.SSs_reg & self.SS_ulr below
-    def setup_fold_tree_from_SS(self,subdef_in=[],SSs_ulr=None,report=False,
-                                cut_at_mid=True):
+    def setup_fold_tree_from_SS(self,subdef_in=[],SSs_ulr=None,report=False):
+
         if SSs_ulr == []: SSs_ulr = self.SSs_ulr
         SSs_all = self.SSs_reg + SSs_ulr # sort by reg/ulr SSs
         n_nonulrSS = len(self.SSs_reg)
@@ -347,7 +375,7 @@ class FoldTreeInfo:
         ## 3. Find cut points b/w jumps 
         jumpres = [jump.reslist for jump in jumps]
         jumpres.sort()
-        if cut_at_mid:
+        if self.cuttype == 'mid':
             cuts = []
             for i,reslist in enumerate(jumpres[:-1]):
                 i1 = jumpres[i][-1]
@@ -390,7 +418,9 @@ class FoldTreeInfo:
         rosetta.protocols.loops.add_cutpoint_variants( pose )
         return jumps
 
-    def save_as_npz(self,outf,Qcut_for_movable_jump=-1.0,fQcut=-1.0):
+    def save_as_npz(self,outf,
+                    Qcut_for_movable_jump=-1.0,fQcut=-1.0):
+
         nSS = len(self.SSs_reg+self.SSs_ulr)
         jumpinfo = np.ndarray((nSS,7),dtype=int) #begin,end,cut,cen,anc,is_ulr
         nres =  self.cuts[-1] #safe?
@@ -414,14 +444,21 @@ class FoldTreeInfo:
             if jumpmove_by_Q:
                 movable = (jump.anchor==nres+1) and (Qjump<Qcut_for_movable_jump)
             else:
-                movable = jump.movable 
+                movable = jump.movable
+            # override as "off" if extended & allow_beta_jump off
+            if not self.allow_beta_jump and SS.SStype == 'E':
+                movable  = False
+
             jumpinfo[i] = np.array([SS.begin,SS.end,self.cuts[i],jump.cen,jump.anchor,
                                     0,movable],dtype=int)
             
-        # candidates of ULR & vroot stubs -- vroot may be empty unless term search specified
-        #vrootstub = skip -- requires pose.residue(nres+1) info
-        
+        # candidates of ULR & vroot stubs
+        # simplify for now -- share a common
+        vrootstub = self.stub_anc_np
+        print("Vroot at saving: \n", vrootstub)
+
         ulrstubs = [{} for i in range(nSS)]
+        nstubs = 0
         for i,SS in enumerate(self.SSs_ulr):
             ij = i+len(self.SSs_reg)
             jump = self.jumps[ij]
@@ -429,10 +466,14 @@ class FoldTreeInfo:
                                      1,1],dtype=int)
 
             if jump.stub_anc_np != []:
-                ulrstubs[ij]['anchor'] = jump.stub_anc_np
                 ulrstubs[ij]['ulr']    = [moveset.stub_SS_np for moveset in jump.movesets]
+                ulrstubs[ij]['tors']    = [moveset.tors for moveset in jump.movesets]
+                nstubs += len(ulrstubs[ij]['ulr'])
 
-        print("Movable jumps: ", [i for i,jump in enumerate(jumpinfo) if jump[6]]) 
+        print("Movable jumps: ", [i for i,jump in enumerate(jumpinfo) if jump[6]])
+        for i,ulrstub in enumerate(ulrstubs):
+            if 'ulr' in ulrstub:
+                print("Pre-sampled ulr stubs at %d: %d"%(i,len(ulrstub['ulr'])))
 
         np.savez(outf,
                  Qres=self.Qres,
@@ -441,8 +482,9 @@ class FoldTreeInfo:
                  maxdev=self.maxdev,
                  jump=jumpinfo,
                  ulrs=self.ulrs,
-                 #vrootstub=vrootstub,
+                 vrootstub=vrootstub,
                  ulrstubs=ulrstubs,
+                 cuttype=self.cuttype,
                  allow_pickle=True)
 
     def estimate_torsion_confidence(self,poseinfo,SSpred_fn):
@@ -468,7 +510,9 @@ class FoldTreeInfo:
         P_tors /= max(P_tors)
         self.Qtors = max(P_tors,P_SS) # better way???
 
-    def load_from_npz(self,npz,pose,report=True,debug=False):
+    def load_from_npz(self,npz,pose,
+                      randomize_ulrjump=True,
+                      report=True,debug=False):
         # Info to fill in
         info = np.load(npz,allow_pickle=True)
         self.Qres = info['Qres']
@@ -477,13 +521,16 @@ class FoldTreeInfo:
         self.SSs_ulr = []
         self.jumps = []
         self.cuts = []
+        self.cuttype = info['cuttype']
 
         if pose == None:
             self.nres =  len(self.Qres)
         else:
-            if not pose.residue(pose.size()).is_virtual_residue(): 
-                PR.rosetta.core.pose.addVirtualResAsRoot(pose)
-            self.nres = pose.size()-1
+            if pose.residue(pose.size()).is_virtual_residue(): 
+                #PR.rosetta.core.pose.addVirtualResAsRoot(pose)
+                pose.delete_residue_slow(pose.size())
+            self.nres = pose.size()
+            
         if self.nres != len(self.Qres):
             sys.exit("Failed to retrieve FTinfo from file %s: nres inconsistent!"%npz)
             
@@ -494,16 +541,44 @@ class FoldTreeInfo:
         self.cuts = []
         self.jumps = []
         for i,[b,e,cut,cen,anc,is_ulr,movable] in enumerate(info['jump']):
-            #movable = (anc != self.nres+1)
-            jump = Jump(anc,cen,range(b,e+1),movable=movable,is_ULR=is_ulr)
+
+            if is_ulr:
+                # define as "jump" only if TERMlib defined there
+                if info['ulrstubs'][i] == {}:
+                    continue
+                # randomize ulr jump
+                if randomize_ulrjump:
+                    ranno = 3.0*random.random()
+                    if ranno > 1.0 and cen+2 <= e:
+                        cen += 2
+                    elif ranno > 2.0 and cen-2 >= b:
+                        cen -= 2
+
+            Qjump = np.mean(self.Qres[b-1:e])
+            jump = Jump(anc,cen,range(b,e+1),movable=movable,
+                        is_ULR=is_ulr,ijump=len(self.jumps),
+                        Q=Qjump)
             self.jumps.append(jump)
+
+        # redefine cuts considering ULRs
+        alres = [(jump.reslist[0],jump.reslist[-1]) for jump in self.jumps]
+        alres.sort()
+        for i,(b,_) in enumerate(alres[1:]):
+            e = alres[i][1] #previous end
+            if self.cuttype == 'mid':
+                cut = int((b+e)*0.5)
+            else: #end
+                cut = b-1 #curr b-1
             self.cuts.append(cut)
+        self.cuts.append(self.nres)
+            
         if report:
-            for i,[_,_,_,cen,anc,is_ulr,movable] in  enumerate(info['jump']):
-                a = max([1]+[cut+1 for cut in self.cuts if cut < cen])
-                b = min([cut for cut in self.cuts if cut > cen])
-                print(" - Jump %2d (%3d-%3d), %3d -> %3d, is_ULR/move=%d/%d"%(i,a,b,cen,
-                                                                              anc,is_ulr,movable))
+            for i,jump in enumerate(self.jumps):
+                a = max([1]+[cut+1 for cut in self.cuts if cut < jump.cen])
+                b = min([]+[cut for cut in self.cuts if cut > jump.cen])
+                form = " - Jump %2d (%3d-%3d), %3d -> %3d, is_ULR/move=%d/%d, Q=%5.3f"
+                print(form%(i,a,b,jump.cen,jump.anchor,jump.is_ULR,jump.movable,jump.Q))
+            
         if report: print(" - Cuts: ", self.cuts )
 
         if pose == None: return
@@ -512,41 +587,52 @@ class FoldTreeInfo:
         jumpdef = [(jump.anchor,jump.cen) for jump in self.jumps]
         stat = rosetta_utils.tree_from_jumps_and_cuts(ft,self.nres+1,jumpdef,
                                                       self.cuts,self.nres+1)
-
         if not stat:
             print("Failed to define FoldTree from file %s, return!"%(npz))
             return False
 
+        if not pose.residue(pose.size()).is_virtual_residue():
+            PR.rosetta.core.pose.addVirtualResAsRoot(pose)
+            
         PR.rosetta.core.pose.symmetry.set_asymm_unit_fold_tree( pose, ft )
         PR.rosetta.protocols.loops.add_cutpoint_variants( pose )
 
         # (optional) load stub set if exists
         # load placeholders first
+        vrootstub = info['vrootstub']
+
         xyz1  = pose.residue(pose.size()).xyz("ORIG")
         xyz2  = pose.residue(pose.size()).xyz("X")
         xyz3  = pose.residue(pose.size()).xyz("Y")
+        id1 = PR.rosetta.core.id.AtomID(1,pose.size()) #ORIG
+        id2 = PR.rosetta.core.id.AtomID(2,pose.size()) #X
+        id3 = PR.rosetta.core.id.AtomID(3,pose.size()) #Y
+        for k in range(3):
+            xyz1[k] = vrootstub[0,k]
+            xyz2[k] = vrootstub[1,k]
+            xyz3[k] = vrootstub[2,k]
+        pose.set_xyz( id1, xyz1 )
+        pose.set_xyz( id2, xyz2 )
+        pose.set_xyz( id3, xyz3 )
+
+        # reinstance so that it doesn't mess up vroot
+        xyz1 = PR.rosetta.numeric.xyzVector_double_t(0.0)
+        xyz2 = PR.rosetta.numeric.xyzVector_double_t(0.0)
+        xyz3 = PR.rosetta.numeric.xyzVector_double_t(0.0)
+        
         for i,jump in enumerate(self.jumps):
             if info['ulrstubs'][i] == {}: continue
-            
-            jump.stub_anc_np = info['ulrstubs'][i]['anchor']
-            for k in range(3):
-                xyz1[k] = jump.stub_anc_np[0,k]
-                xyz2[k] = jump.stub_anc_np[1,k]
-                xyz3[k] = jump.stub_anc_np[2,k]
-            jump.stub_SS = PR.rosetta.core.kinematics.Stub(xyz1,xyz2,xyz3)
 
-            for stub_np in info['ulrstub'][i]['ulr']:
+            # get stubs
+            for j,stub_np in enumerate(info['ulrstubs'][i]['ulr']):
                 moveset = JumpMove()
-                moveset.stub_SS_np = info['ulrstubs'][i]['ulr']
+                moveset.tors = info['ulrstubs'][i]['tors'][j]
                 for k in range(3):
-                    xyz1[k] = stub_np[0,k]
-                    xyz2[k] = stub_np[1,k]
-                    xyz3[k] = stub_np[2,k]
+                    xyz1[k] = stub_np[0,k] #CA
+                    xyz2[k] = stub_np[1,k] #N
+                    xyz3[k] = stub_np[2,k] #Cprv
                 moveset.stub_SS = PR.rosetta.core.kinematics.Stub(xyz1,xyz2,xyz3)
                 jump.movesets.append(moveset)
-
-        #if 'vrootsub' in info.files:
-        #    d
 
         # Validate
         # foldtree by randomly perturbing loop residues
@@ -563,6 +649,7 @@ class FoldTreeInfo:
                 pose.set_psi(ires, 120)
                 pertres.append(ires)
             pose.dump_pdb("validft.pdb")
+
         return True
     
     def estimate_RG_magnitudes(self,maxdev):

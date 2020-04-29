@@ -7,7 +7,7 @@ from Scorer import Scorer
 
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0,SCRIPTDIR+'/basic')
-import SamplingOperators
+import SamplingOperators as SO
 import rosetta_utils
 import estogram2cst
 from FoldTreeInfo import FoldTreeInfo
@@ -88,22 +88,33 @@ def arg_parser(argv):
                      help='num. steps for each AnnealQ runs') #deprecated
     opt.add_argument('-nmacro', type=int, default=1,
                      help='num. steps for macro cycles')
+    opt.add_argument('-nbranch', type=int, default=50,
+                     help='nsamples to branch every step')
+    
     ### relative weights
-    opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[1.0,1.0,0.0], #fraginsert only
-                     help="weights on movers [frag-insert/jump-opt/motif-insert]")
+    opt.add_argument('-mover_weights', dest='mover_weights', nargs='+', type=float, default=[], #auto
+                     help="weights on movers [frag-insert/jump-opt/unused]")
+    opt.add_argument('-branch_mover', default=False, action="store_true",
+                     help="Apply same type of mover across all the branching samples")
     
     ### Jump-opt
     ## 1. Through Auto setup: no input args for ulr / sub_def
     opt.add_argument('-autoFT', dest='autoFT', default=False, action='store_true', \
                      help='automatically setup FT looking at estogram')
+    opt.add_argument('-termsearch_mode', default="major",
+                     help='which jump to try term (default=major: try only least confident)')
 
     ## 2. or Through extra user-provided arguments 
     opt.add_argument('-ulr', dest='ulr_s', metavar='ULRs', nargs='+', default=[], \
                      help='ULRs should be sampled. (e.g. 5-10 16-20). If not provided, whole structure will be sampled')
     opt.add_argument('-sub_def', dest='sub_def', nargs='+', default=[],
                      help="definition of subs: argument same as -ulr")
-                     
+    opt.add_argument('-allow_beta_jump', default=False, action='store_true',
+                     help="Allow jump DOF sampling of beta strands") # False by default
+                      
     ### FragInsert
+    opt.add_argument('-fragopt', default='single',
+                     help='Fragment insertion type (single/mc)')
     opt.add_argument('-min_chunk_len', dest='min_chunk_len', nargs='+', type=int, default=[3,5,1000],
                      help="minimum length of SS defined as chunk [E/H/C]")
 
@@ -178,30 +189,52 @@ def arg_parser(argv):
 def check_opt_consistency(opt):
     return True
 
-
 ##### simple function using GPU 
 def branch_and_select_1step(pose_in,sampler,scorer,n,
+                            minchange=0.0, # for aggressive movement
                             minimizer=None,
-                            prefix=None):
-
+                            branch_mover=False,
+                            prefix=None,
+                            #kT=0.1,
+                            #kT=99 #always drift (i.e. No reject),
+):
     time0 = time.time()
     poses = []
+    rmsds = []
+
+    # pre-select mover
+    movername = 'random'
+    if branch_mover: movername = sampler.select_mover()
+    
     for i in range(n):
         pose = pose_in.clone()
-        move = sampler.apply(pose)
+        move = sampler.apply(pose,move=movername)
+        rmsd = PR.rosetta.core.scoring.CA_rmsd(pose,pose_in)
+        rmsds.append(rmsd)
         poses.append(pose)
         if prefix != None: pose.dump_pdb(prefix+"%02d.pdb"%i)
-    time1 = time.time()
 
+    # append starting pose for scoring
+    #poses.append(pose_in)
+
+    time1 = time.time()
     scores = scorer.score(poses)
     time2 = time.time()
 
-    imin = np.argmin(scores)
-    Ecomp_min = scorer.by_component[imin]
-    extralog = "Elapsed time, pert(min)/score: %.1f %.1f"%(time1-time0,time2-time1)
-    extralog += "; Emin comp: "+' '.join(["%s %8.5f"%(key,Ecomp_min[key]) for key in Ecomp_min])
+    sort_by_score = [i for i in np.argsort(scores) if rmsds[i] > minchange]
+    if len(sort_by_score) == 0:
+        sort_by_score = np.argsort(scores)
+
+    print(' '.join(["%3.1f"%rmsds[i] for i in sort_by_score[:min(20,len(sort_by_score))]]))
+
+    imin = sort_by_score[0]
     
-    return poses[imin], min(scores), extralog
+    Ecomp_min = scorer.by_component[imin] #cached
+    extralog = "Sel %02d, Elapsed time, pert(min)/score: %.1f %.1f"%(imin,time1-time0,time2-time1)
+    extralog += "; Moveset %s"%movername
+    extralog += "; Emin comp: "+' '.join(["%s %6.3f"%(key,Ecomp_min[key]) for key in Ecomp_min])
+    
+    return poses[imin], scores[imin], extralog
 
 class Scheduler:
     def __init__(self,opt,do_Qopt=False):
@@ -230,7 +263,7 @@ class Scheduler:
         # stage2: score1, vdw1   brk0.1 cst0.1 -> 1000
         # stage3: {score2<->score5}, vdw1  brk0.25 cst0.25 -> 10*1000
         # stage4: score3, full scale -> 3*200
-        self.niter = [1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]
+        self.niter = [  10,  10,  10,  10,  10,  10,  10,  10,  10,  10,  25]
         self.kT    = [2.5,  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         self.wvdw  = [0.1,  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         self.wbrk  = [0.0,  0.1, 0.1, 0.3, 0.2, 0.7, 0.5, 1.0, 0.8, 1.0, 1.0]
@@ -238,15 +271,15 @@ class Scheduler:
 
     def load_Qanneal_sch(self):
         #pert/insert/refine/closure
-        self.niter = [  10,  self.nstep_anneal,   5,  10] #pert/Qanneal/Qrefine/closure
+        self.niter = [  10,  self.nstep_anneal, 10, 6] #pert/Qanneal/Qrefine/closure
         #self.niter = [   10,   0,   0,  10] #DEBUG
         self.kT    = [  0.0, 0.0, 0.0, 1.0]
         #these values are scales wrt input wts
         self.wvdw  = [  0.1, 1.0, 1.0, 1.0]
-        self.wbrk  = [  0.0, 0.1, 0.1, 1.0]
+        self.wbrk  = [  0.0, 0.1, 0.1, 1.0] #keep nonzero for reporting purpose
         self.wcst  = [  0.1, 1.0, 1.0, 1.0]
         self.wQ    = [  0.1, 1.0, 1.0, 0.0]
-        self.wdssp = [  0.1, 1.0, 1.0, 1.0]
+        self.wdssp = [  0.1, 0.1, 1.0, 1.0]
 
     def load_debug_sch(self):
         self.niter = [100 , 500, 500, 500]
@@ -279,6 +312,69 @@ class Annealer:
 
     def __exit__(self,exc_type,exc_val,exc_tb):
         pass
+
+    def initialize_pose_with_FT(self,pose,FTInfo,relax=True):
+        # first make as extended at ulr
+        ulrres = []
+        for ulr in FTInfo.ulrs: ulrres += ulr
+        for resno in ulrres:
+            pose.set_phi(resno,-135.0)
+            pose.set_psi(resno, 135.0)
+            pose.set_omega(resno,180.0)
+
+        # check whether TERMdb declared in FTInfo; if not, pass
+        #weight = np.array([len(jump.movesets) for jump in FTInfo.jumps],dtype='float16')
+        weight = np.zeros(len(FTInfo.jumps))
+        for i,jump in enumerate(FTInfo.jumps):
+            if len(jump.movesets) > 0: weight[i] = 1.0/(jump.Q+0.01)
+        
+        if sum(weight) > 0:
+            weight /= float(np.sum(weight))
+            if self.opt.termsearch_mode == "major":
+                jumpid = np.argmax(weight)
+            else:
+                jumpid = random.choices(list(range(len(FTInfo.jumps))),weight)[0]
+            print("TERM search weight: ", weight, "selection opt=%s, jumpid:"%(self.opt.termsearch_mode,jumpid))
+
+            # apply and select
+            jump = FTInfo.jumps[jumpid]
+
+            sfxn = PR.create_score_function("score0.wts") #vdw 0.1
+            sfxn.set_weight( PR.rosetta.core.scoring.atom_pair_constraint, 0.1 )
+            sfxn.set_weight( PR.rosetta.core.scoring.cen_hb, 0.1 ) #bias to parallel?
+            sfxn.set_weight( PR.rosetta.core.scoring.hbond, 0.1 )
+
+            Es = []
+            poses = []
+            for k in range(50): #randomly pick from N: higher N, less diversity (as the same thing will be picked always)
+                pose_,restags = jump.moveset_to_pose(pose,mode='random',report_pdb=False)
+                pose = pose_[0]
+                restag = restags[0]
+            
+                sfxn.score(pose)
+                Ev = pose.energies() 
+                Esum = sum([Ev.residue_total_energy(res) for res in restag])
+                Es.append(Esum)
+                #pose.dump_pdb("jump%d.pdb"%k)
+                poses.append(pose)
+                
+            # pick lowest E
+            pose = poses[np.argsort(Es)[0]]
+            print(np.argsort(Es))
+            print(Es)
+        pose.dump_pdb('switch.pdb')
+
+        if relax:
+            residue_weights = np.zeros(FTInfo.nres)
+            for res in ulrres:
+                insertable = [res+k for k in range(9) if res+k in ulrres] #allow +-2 change
+                if len(insertable) > 7: residue_weights[res-1] = 1.0
+            multiFragInsertor = SO.FragmentMC(self.opt.fragbig,
+                                              residue_weights,
+                                              mciter=100,kT=1.0)
+            pose = multiFragInsertor.apply(pose)
+
+        return pose
     
     def apply(self,pose0,FTnpz,
               runno=0,report_trj=""):
@@ -297,6 +393,7 @@ class Annealer:
         ## FTsetup: retreive FT from input npz file
         pose = pose0.clone()
         FTInfo = FoldTreeInfo(pose,self.opt) #opt should have --- ?
+
         if FTnpz == None:
             rosetta_utils.simple_ft_setup(pose,ulrs=self.opt.ulrs)
         else:
@@ -304,10 +401,6 @@ class Annealer:
 
         scorer = Scorer(self.opt, FTInfo.cuts, normf=1.0/pose.size())
 
-        # hack
-        #scorer.close()
-        #return [pose]
-        
         ## Score/Cst setup
         if self.opt.scoretype == "default":
             self.opt.scoretype = "Q"
@@ -322,24 +415,41 @@ class Annealer:
             #self.opt.Pspline_on_fa=0.3 #==throw away if maxP in estogram lower than this val
 
             # refpose == pose0
+            ulrres = []
+            for ulr in FTInfo.ulrs: ulrres += ulr
             estogram2cst.apply_on_pose( pose,npz=self.opt.cen_cst,
-                                        opt=self.opt )
-            
+                                        opt=self.opt,
+                                        mask=ulrres )
+
+        # estogram used to filter jumps
+        pose = self.initialize_pose_with_FT(pose,FTInfo)
+        pose.dump_pdb('iFT.pdb')
+
         ## Sampler --  FTInfo-aware version
         print("Get samplers...")
-        perturber, inserter, refiner, closer = SamplingOperators.get_samplers(pose,self.opt,FTInfo)
+        perturber, inserter, refiner, closer = SO.get_samplers(pose,self.opt,FTInfo)
         scheduler = Scheduler(self.opt,do_Qopt=('Qcen' in scorer.wts))
         
         ## Coarse-grained sampling stage
         # 1. perturb initially
         print("Perturb...")
-        for k in range(scheduler.niter[0]):
-            perturber.apply(pose)
-        
-        Emin = scorer.score([pose])[0]
-        print("Einit ",Emin)
-        pose.dump_pdb("ipert.pdb")
+
+        poses = []
+        for i in range(self.opt.nbranch):
+            pose_work = pose.clone()
+            for k in range(scheduler.niter[0]):
+                perturber.apply(pose_work)
+            poses.append(pose_work)
+
+        scheduler.adjust_scorer_scale(0,scorer)
+        Es = scorer.score(poses)
+        imin = np.argsort(Es)[0]
+        pose = poses[imin]
+
         pose_min = pose
+        Emin = Es[imin]
+        pose_min.dump_pdb("ipert.pdb")
+        print("Einit ",Emin)
 
         # to report
         poses_out = []
@@ -349,12 +459,18 @@ class Annealer:
             niter = scheduler.get_niter(stage)
             print("Running stage %d, niter=%d..."%(stage,niter))
             scheduler.adjust_scorer_scale(stage,scorer)
+            minchange=0.0         
             if stage == scheduler.nstages()-2:
                 sampler = refiner
+
             elif stage == scheduler.nstages()-1:
                 closer.kT = scheduler.kT[stage]
                 sampler = closer
-            else: sampler = inserter
+            else:
+                sampler = inserter
+                minchange = 1.0 #has to move at least X Ang every step
+
+            sampler.show_ops()
                         
             for i in range(niter):
                 # now that scorer weights readjusted, let's renew Emin
@@ -362,10 +478,15 @@ class Annealer:
 
                 pose_in = pose_min
                 pose_out, Eout, extrainfo \
-                    = branch_and_select_1step(pose_in,sampler,scorer,50)
+                    = branch_and_select_1step(pose_in,sampler,scorer,
+                                              self.opt.nbranch,
+                                              minchange=minchange,
+                                              branch_mover=self.opt.branch_mover,
+                                              #prefix="tmp.%d."%(it)
+                    )
 
                 # report insertion sites
-                sampler.show()
+                if self.opt.debug: sampler.show()
             
                 print("ANNEAL: %3d %7.4f %7.4f %1d | %s"%(i,Emin,Eout,(Eout<Emin),extrainfo))
                 if Eout < Emin: #annealing
@@ -378,19 +499,17 @@ class Annealer:
 
                     if report_trj == "": continue
                     rosetta_utils.report_pose(pose_min,
-                                              tag=self.opt.prefix+"%d.%d"%(runno,it),
+                                              tag=self.opt.prefix+".%d.%03d"%(runno,it),
                                               extra_score = [("score",Emin)],
                                               outsilent=report_trj,
                                               refpose=refpose)
                 it += 1
                 
-        # Free GPU memory
         scorer.close()
-        #del scorer
         
         # recover original fully-connected FT
         for i,pose in enumerate(poses_out):
-            rosetta_utils.reset_fold_tree(pose,pose.size()-1,ft0)
+            rosetta_utils.reset_fold_tree(pose,FTInfo.nres,ft0)
             #pose.remove_constraints() #estogram -- decide later
             poses_out[i] = pose #necessary?
         return poses_out

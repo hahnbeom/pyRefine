@@ -14,14 +14,36 @@ class SamplingMaster:
         self.minimizer = None
         self.minimize = False
 
-    def apply(self,pose):
-        op_sel = random.choices(self.operators,self.probs)[0]
+    def apply(self,pose,move='random'):
+        op_sel = None
+        if move != 'random':
+            for op in self.operators:
+                if op.name == move:
+                    op_sel = op
+                    break
+            if op_sel == None:
+                print("Warning! such mover doesn't exist: %s; applying random"%move)
+                
+        if op_sel == None:
+            op_sel = random.choices(self.operators,self.probs)[0]
+            
         ans = op_sel.apply(pose)
         if ans != None: pose.assign(ans)
         
         if self.minimize:
             self.mimizer.apply(pose)
         return op_sel.name
+
+    def select_mover(self):
+        op_sel = random.choices(self.operators,self.probs)[0]
+        return op_sel.name
+
+    def show_ops(self):
+        l = ' Sampler %s: Operators '%self.name
+        for op in self.operators: l += ' %s'%op.name
+        l += ', weights '
+        for p in self.probs: l += ' %5.3f'%p
+        print(l)
 
     def show(self):
         for op in self.operators:
@@ -78,6 +100,9 @@ class FragmentInserter:
 
         #very stupid way but still works fast enough
         mover = rosetta.protocols.simple_moves.ClassicFragmentMover(self.fragset, mm)
+
+        #fragsets = rosetta.utility_vector1_core_fragment_FragSet()
+        #mover = rosetta.protocols.hybridization.WeightedFragmentTrialMover(fragsets,)
         mover.apply(pose)
 
     def show(self):
@@ -89,8 +114,11 @@ class FragmentInserter:
 class FragmentMC:
     def __init__(self,fragf,residue_weights,
                  mciter=50,frag_ntop=25,
+                 kT = 1.0,
+                 npert=0,
+                 w_chain_brk=1.0,
                  name=""):
-        self.kT = 1.0
+        self.kT = kT
         
         frag_IO = rosetta.core.fragment.FragmentIO( frag_ntop )
         self.fragset = frag_IO.read_data(fragf) #FragSet
@@ -99,17 +127,28 @@ class FragmentMC:
         self.residue_weights = residue_weights #[0.0 for i in range(nres)]
         self.name = name
         self.scorer = create_score_function("score3.wts")
-        self.scorer.set_weight(rosetta.core.scoring.linear_chainbreak, 1.0)
+        self.scorer.set_weight(rosetta.core.scoring.linear_chainbreak, w_chain_brk)
         self.niter = mciter
+        self.npert = npert
         
         nres = len(residue_weights)
         self.last_inspos = nres-self.nmer+2
 
-    def apply(self,pose):
+    def apply(self,pose,report=False):
         if self.scorer == None:
             sys.exit("Scorer not defined for mover %s!"%self.name)
+
+        time0 = time.time()
+        # start with random insertion for perturbation...
+        for it in range(self.npert):
+            insert_pos = random.choices(range(1,self.last_inspos+1),
+                                        self.residue_weights[:self.last_inspos])[0]
+            mm = MoveMap()
+            mm.set_bb(False)
+            mm.set_bb(insert_pos)
+            mover = rosetta.protocols.simple_moves.ClassicFragmentMover(self.fragset, mm)
+            mover.apply(pose)
             
-        #time0 = time.time()
         pose_min = pose.clone()
         E0 = self.scorer.score(pose_min)
         Emin = E0
@@ -126,8 +165,9 @@ class FragmentMC:
             pose_work = pose.clone()
             mover.apply(pose_work)
             E = self.scorer.score(pose_work)
-
-            #print("iter/Emin/E/Eprv: %3d %6.3f %6.3f %6.3f"%(it,Emin,E,Eprv))
+            
+            if report:
+                print("iter/res/Emin/E/Eprv: %3d %3d %8.3f %8.3f %8.3f"%(it,insert_pos,Emin,E,Eprv))
             if E < Eprv or np.exp(-(E-Eprv)/self.kT) > random.random():
                 pose = pose_work
                 nacc += 1
@@ -139,8 +179,9 @@ class FragmentMC:
 
         accratio = float(nacc)/self.niter
         dE = Emin-E0
-        #time1 = time.time()
-        #print("Elapsed time for %d fragMC: %.1f sec"%(self.niter, time1-time0))
+        time1 = time.time()
+        if report:
+            print("Acc Ratio %.2f, Elapsed time for %d fragMC: %.1f sec"%(accratio,self.niter, time1-time0))
         return pose_min
 
 class Chunk:
@@ -300,19 +341,21 @@ class JumpSampler:
                  maxtrans,
                  maxrot,
                  allowed_jumps=[],
+                 SStypes=[],
                  name=""):
 
         # make a subset that are movable
         self.anchors = []
         if allowed_jumps == []:
-        #    for i,jump in enumerate(FTInfo.jumps):
-        #        if jump.movable: self.anchors.append(anc)
             self.anchors = anchors
         else:
-            #for i in allowed_jumps:
-            #    jump = FTInfo.jumps[i]
-            #    if jump.movable: self.anchors.append(jump.anchor)
             self.anchors = [anchors[i] for i in allowed_jumps]
+
+        # make sure len(SStypes) == len(anchors)
+        if len(SStypes) != len(anchors):
+            self.SStypes = ['H' for i in anchors] #Full scale for H, half for the rest
+        else:
+            self.SStypes = SStypes
                 
         self.name = name
         self.maxtrans = maxtrans
@@ -322,9 +365,15 @@ class JumpSampler:
     def apply(self,pose):
         njumps_movable = len(self.anchors)
         ancres = random.choices(self.anchors,[1.0 for k in range(njumps_movable)])[0]
+        i = self.anchors.index(ancres)
+
+        (maxrot,maxtrans) = (self.maxrot,self.maxtrans)
+        if self.SStypes[i] != 'H':
+            (maxrot,maxtrans) = (0.5*self.maxrot,0.5*self.maxtrans)
 
         jumpid = pose.fold_tree().get_jump_that_builds_residue( ancres )
         jump = pose.jump( jumpid )
+        #print("JumpPert %d %d"%(jumpid,ancres))
 
         ## simpler way: is this good enough -- NEVER USE THIS
         ## direction: 1 or -1 -- meaning?
@@ -341,7 +390,7 @@ class JumpSampler:
         
         ang_in_rad = self.maxrot*random.random()*np.pi/180.0
         sa = np.sin(ang_in_rad)
-        
+       
         Qrot = [np.cos(ang_in_rad), sa*axis[0], sa*axis[1], sa*axis[2]]
         Qnew = rosetta_utils.Qmul( Q, Qrot )
         Rnew = rosetta_utils.quat2R( Qnew )
@@ -418,7 +467,7 @@ def get_residue_weights(opt,FTInfo,nres,nmer):
         print( "Fragment insertion disallowed: "+" %d"*len(disallowed)%tuple(disallowed))
 
     residue_weights = [0.0 for k in range(nres)]
-    print("ULRs:", FTInfo.ulrs)
+    #print("ULRs:", FTInfo.ulrs)
     ulrres = []
     for ulr in FTInfo.ulrs: ulrres += list(ulr)
 
@@ -429,41 +478,47 @@ def get_residue_weights(opt,FTInfo,nres,nmer):
                 words = l[:-1].split()
                 resno = int(words[0])
                 residue_weights[resno-1] = float(words[1])
-            return residue_weights
+            #return residue_weights
         
         # 2. Using MinkTors
         elif FTInfo.Qtors != [] and len(FTInfo.Qtors) == nres:
             print("Define residue weights from predicted torsion quality...")
             #log scale of CAdev, 1.0 at ULR, aligned_frag_w at core
             residue_weights = 1.0-FTInfo.Qtors
-            residue_weights += -min(FTInfo.Qtors) + opt.aligned_frag_w 
-            return residue_weights
+            residue_weights += -min(FTInfo.Qtors) + opt.aligned_frag_w
+            #return residue_weights
 
         # 3rd. from CAdev estimation
         elif FTInfo.CAdev != []:
             print("Define residue weights from predicted CA deviation...")
             residue_weights = np.log(FTInfo.CAdev/100.0+1.0) + opt.aligned_frag_w #log scale of CAdev, 1.0 at ULR, aligned_frag_w at core
-            return residue_weights
+            #return residue_weights
         
-        else:
-            print("Weighted Frag Insertion failed: cannot detect resweights_fn nor AutoCAdev from .npz. Do random instead.")
+    else:
+        # Otherwise binary
+        print("Weighted Frag Insertion failed: cannot detect resweights_fn nor AutoCAdev from .npz. Do random instead.")
 
-    # Otherwise binary
-    for res in range(nres-nmer+2):
-        nalned = 0.0
-        for k in range(nmer):
-            if res+k in disallowed: #do not allow insertion through disallowed res
-                nalned = 0
-                break 
-            if res+k not in ulrres: nalned += opt.aligned_frag_w
-            else: nalned += 1.0
-        residue_weights[res-1] = nalned
+        for res in range(1,nres-nmer+2):
+            nalned = 0.0
+            for k in range(nmer):
+                if res+k in disallowed: #do not allow insertion through disallowed res
+                    nalned = 0
+                    break 
+                if res+k not in ulrres: nalned += opt.aligned_frag_w
+                else: nalned += 1.0
+            residue_weights[res-1] = nalned
+            
+    l = 'RESIDUE WEIGHTS: '
+    for k in range(nres):
+        if k%20 == 0: l += '\n%3d- :'%(k+1)
+        l += ' %4.2f'%(residue_weights[k])
+    print(l)
     return residue_weights
 
 def get_samplers(pose,opt,FTInfo=None):
     opt_cons = copy.copy(opt)
     opt_cons.aligned_frag_w = 0.0
-
+    
     main_units = []
     main_w = []
     pert_units = []
@@ -475,6 +530,23 @@ def get_samplers(pose,opt,FTInfo=None):
     
     residue_weights_big = get_residue_weights(opt,FTInfo,nres,9)
     residue_weights_small = get_residue_weights(opt,FTInfo,nres,3)
+
+    # Get pose SS info
+    dssp = rosetta.core.scoring.dssp.Dssp(pose)
+    SS3 = [a for a in dssp.get_dssp_reduced_IG_as_L_secstruct()] # as a string
+    
+    # get list of jumps to sample
+    jumps_to_sample = [i for i,jump in enumerate(FTInfo.jumps) if jump.movable]
+    print("Jumps to sample",  jumps_to_sample)
+
+    mover_weights = opt.mover_weights
+    if mover_weights == []: #auto
+        frag_w = np.mean(residue_weights_big)/9.0 #0~1
+        jump_w = np.sum([FTInfo.jumps[i].nres for i in jumps_to_sample])/FTInfo.nres
+        mover_weights = np.array([frag_w,jump_w,0.0])
+        mover_weights /= np.sum(mover_weights)
+        print("- Mover weight undefined; Set auto weight: %5.3f/%5.3f/%5.3f"%tuple(mover_weights))
+    
     '''
     residue_weights_close = np.zeros(nres)+0.1
     for cut in FTInfo.cuts:
@@ -482,33 +554,40 @@ def get_samplers(pose,opt,FTInfo=None):
             if cut+k < 1 or cut+k >= nres: continue
             residue_weights_close
     '''
-        
-    # get list of jumps to sample
-    jumps_to_sample = [i for i,jump in enumerate(FTInfo.jumps) if jump.movable]
-    print("Jumps to sample",  jumps_to_sample)
     
     ## Samplers
+    multiFragInsertor_p = FragmentMC(opt.fragbig,
+                                     residue_weights_big,
+                                     mciter=25, #mciter x niter x nsample = 20x10x50 = 10000
+                                     kT=2.0,npert=0,w_chain_brk=1.0,
+                                    name="FragMCBig")
+    multiFragInsertor_small = FragmentMC(opt.fragsmall,
+                                         residue_weights_small,
+                                         mciter=25, #mciter x niter x nsample = 20x10x50 = 10000
+                                         kT=2.0,npert=0,w_chain_brk=1.0,
+                                         name="FragMCSmall")
+    
     # MultifragMCmover for closure
-    closureMCmover = FragmentMC(opt.fragbig,
-                                residue_weights_big,
-                                mciter=20, #mciter x niter x nsample = 20x10x50 = 10000
-                                name="ClosureMC")
-    closer = SamplingMaster(opt,[closureMCmover],[1.0],"Closer")
+    multiFragInsertor_c = FragmentMC(opt.fragbig,
+                                    residue_weights_big,
+                                    mciter=20, #mciter x niter x nsample = 20x10x50 = 10000
+                                    name="FragMCBig")
+    closer = SamplingMaster(opt,[multiFragInsertor_c],[1.0],"Closer")
 
     # Fragment insertion
-    if opt.mover_weights[0] > 1.0e-6:
-        w = opt.mover_weights[0]
+    if mover_weights[0] > 1.0e-6:
+        w = mover_weights[0]
 
         # Mutation operator for initial perturbation
         mutOperator0 = FragmentInserter(opt_cons,opt.fragbig,residue_weights_big,
-                                           name="FragBigULR")
+                                        name="FragBigULR")
     
         # Regular Mutation operator with big-frag insertion
         mutOperator1 = FragmentInserter(opt,opt.fragbig,residue_weights_big,
-                                           name ="FragBig")
+                                        name ="FragBig")
         # Regular mutation operator with small-frag insertion
         mutOperator2 = FragmentInserter(opt,opt.fragsmall,residue_weights_small,
-                                           name="FragSmall")
+                                        name="FragSmall")
 
         # Chunk from template poses -- unimplemented yet
         #chunkOperator = ChunkReplacer(opt)
@@ -516,21 +595,37 @@ def get_samplers(pose,opt,FTInfo=None):
 
         pert_units += [mutOperator0]
         pert_w += [w]
-        main_units += [mutOperator1, mutOperator2] #, chunkOperator]
-        main_w += [w*opt.p_mut_big, w*opt.p_mut_small] #, w*opt.p_chunk]
-        refine_units += [mutOperator2]
-        refine_w += [w]
+
+        if opt.fragopt == "mc":
+            main_units += [multiFragInsertor_p]
+            main_w += [1.0]
+            refine_units += [multiFragInsertor_small]
+            refine_w += [w]
+        else:
+            main_units += [mutOperator1, mutOperator2] #, chunkOperator]
+            main_w += [w*opt.p_mut_big, w*opt.p_mut_small] # == 1,0 by default #, w*opt.p_chunk]
+            refine_units += [mutOperator2]
+            refine_w += [w]
+        
         print("Make Fragment sampler with weight %.3f..."%w)
 
     # Jump mover
     # Segment searcher also part of here, stub defs passed through FTInfo
-    if opt.mover_weights[1] > 1.0e-6:
-        w = opt.mover_weights[1]
+    if mover_weights[1] > 1.0e-6:
+        w = mover_weights[1]
         jumpcens = [jump.cen for jump in FTInfo.jumps]
+        allowed_jumps = [i for i,jump in enumerate(FTInfo.jumps) if jump.movable]
+        SStypes = [SS3[jump.cen-1] for jump in FTInfo.jumps]
         perturber = JumpSampler(jumpcens,
-                                2.0,15.0,name="JumpBig")
+                                2.0,15.0,
+                                allowed_jumps=allowed_jumps,
+                                SStypes=SStypes,
+                                name="JumpBig")
         refiner   = JumpSampler(jumpcens,
-                                1.0,5.0,name="JumpSmall")
+                                1.0,5.0,
+                                allowed_jumps=allowed_jumps,
+                                SStypes=SStypes,
+                                name="JumpSmall")
         pert_units += [perturber]
         pert_w += [w]
         main_units += [perturber]
@@ -539,8 +634,8 @@ def get_samplers(pose,opt,FTInfo=None):
         refine_w += [w]
         print("Make     Jump sampler with weight %.3f..."%w)
 
-    print( [unit.name for unit in main_units] )
-    print( main_w )
+    #print( [unit.name for unit in main_units] )
+    #print( main_w )
     perturber = SamplingMaster(opt_cons,pert_units,pert_w,"perturber")
     mainmover = SamplingMaster(opt,main_units,main_w,"main") #probability
     refiner = SamplingMaster(opt,refine_units,refine_w,"refiner")

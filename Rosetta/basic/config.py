@@ -5,9 +5,9 @@ CONFIGS = {
     'MINRES_FOR_FRAME': 5, #hard-coded and unusred...
     'SSTYPE_SUPPORTED': ['EE','HEE','HHH'], #['EE','HHH','HH','EEH','EEE'],
     
-    'TERM_DBPATH'     : '%s/TERMlib/'%SCRIPTDIR,
+    'TERM_DBPATH'     : '%s/../data/TERMlib/'%SCRIPTDIR,
     'SEQSCORECUT'     : -1, # everything; use positive value to apply cut
-    'MAXLIBRANK'      : {'EE' :10000,
+    'MAXLIBRANK'      : {'EE' :50,
                          'HHH':1000,
                          'HH' :10000,
                          'HEE':1000,
