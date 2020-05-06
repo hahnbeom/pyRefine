@@ -432,8 +432,12 @@ class FoldTreeInfo:
             Q_SS = []
             for jump in self.jumps: Q_SS += list(self.Qres[jump.reslist[0]-1:jump.reslist[-1]])
             Q_SS.sort()
-            
-            Qcut_for_movable_jump = Q_SS[int(fQcut*nres)] #override
+
+            iQcut = int(fQcut*nres)
+            if iQcut >= len(Q_SS):
+                Qcut_for_movable_jump = 1.0 #always assign
+            else:
+                Qcut_for_movable_jump = Q_SS[iQcut] #override
             print("fQcut %.3f -> define %.3f as Qcut (mean(jumpQ) below will be movable jump"%(fQcut,Qcut_for_movable_jump))
         
         # 1. residue indices defining jump & cut

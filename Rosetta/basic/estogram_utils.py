@@ -176,7 +176,7 @@ def pred_ULR(Q,Qres_soft,fmin=0.15,fmax=0.25,dynamic=False):
 
     ULR = []
     for i,val in enumerate(is_ULR):
-        if val: ULR.append(i)
+        if val: ULR.append(i+1) #1-indexed
     return myutils.trim_lessthan_3(ULR,len(Qres_soft)-1)
     
 ######################################

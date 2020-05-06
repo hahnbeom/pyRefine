@@ -24,8 +24,6 @@ def arg_parser(argv):
     
     parser.add_argument('-npz', dest='npz', required=True,
                      help='DeepAccNet results as npz format')
-    parser.add_argument('-npert_jump_loc', type=int, default=0,
-                        help='Number of FTs with jump location perturbations')
 
     ## output
     parser.add_argument('-outprefix', default="FT",
@@ -43,6 +41,13 @@ def arg_parser(argv):
                         help="Use TERM db lookup to get variable ULR-SS jump candidates")
     parser.add_argument('-allow_beta_jump', default=True, action='store_true',
                         help="Allow jump DOF sampling of beta strands") # block this at pyRefinQ.py if you want
+    parser.add_argument('-simple_mm', default=False, action='store_true',
+                        help="generate only 1 mm")
+    parser.add_argument('-nojump', default=False, action='store_true',
+                        help='disallow jump moves')
+    parser.add_argument('-npert_jump_loc', type=int, default=0,
+                        help='Number of FTs with jump location perturbations')
+
 
     #parser.add_argument('-subdef_confience_offset',
 
@@ -202,6 +207,10 @@ def main(opt,pose=None,FTnpz=None):
     variable_ulr_defs = get_list_of_ulr_defs(FTInfo)
 
     ## Output multiple FT options of ulrs/subs into individual npz
+    if opt.simple_mm:
+        FTInfo.setup_fold_tree(pose,opt,poseinfo,ulrs=FTInfo.ulrs_cons)
+        FTInfo.save_as_npz(opt.outprefix+".simple.npz",fQcut=0.2)
+        return
 
     # a. freeze sub & go through ulrs
     for i,ulrs in enumerate(variable_ulr_defs[:2]):
@@ -209,22 +218,25 @@ def main(opt,pose=None,FTnpz=None):
         FTInfo.setup_fold_tree(pose,opt,poseinfo,ulrs=ulrs)
         if opt.do_termsearch:
             TERMsearch(opt,pose,poseinfo,FTInfo)
-        FTInfo.save_as_npz(opt.outprefix+".ulrdef%d.npz"%(i),fQcut=0.2)
+        fQcut = 0.2
+        if opt.nojump: fQcut = 0.0
+        FTInfo.save_as_npz(opt.outprefix+".ulrdef%d.npz"%(i),fQcut=fQcut)
         
     # b. allow jumps to move, freeze ulr as
-    '''
-    FTInfo_tmp = copy.copy(FTInfo) #safe???
-    FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=FTInfo.ulrs_cons)
-    for i,fQcut in enumerate([0.2,0.3,0.35,0.4]):
-        print("======= Generating %s.jump%d.npz..."%(opt.outprefix,i))
-        FTInfo_tmp.save_as_npz(opt.outprefix+".jump%d.npz"%(i),fQcut=fQcut)
-    '''
+    if not opt.nojump: 
+        FTInfo_tmp = copy.copy(FTInfo) #safe???
+        FTInfo_tmp.setup_fold_tree(pose,opt,poseinfo,ulrs=FTInfo.ulrs_cons)
+        for i,fQcut in enumerate([0.2,0.4,1.0]):
+            print("======= Generating %s.jump%d.npz..."%(opt.outprefix,i))
+            FTInfo_tmp.save_as_npz(opt.outprefix+".jump%d.npz"%(i),fQcut=fQcut)
 
     # c. freeze ulrs & go through subs
+    '''
     for i,subdef in enumerate(FTInfo.subdefs):
         print("======= Generating %s.subdef%d.npz..."%(opt.outprefix,i))
         FTInfo.setup_fold_tree(pose,opt,poseinfo,subdef_in=subdef)
         FTInfo.save_as_npz(opt.outprefix+".subdef%d.npz"%(i))
+    '''
 
     # d. randomize jump centers a bit
     '''

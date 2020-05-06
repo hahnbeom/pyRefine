@@ -199,8 +199,11 @@ def trim_lessthan_3(ulrin,nres):
     for reg in copy.copy(regs):
         if len(reg) < 3:
             regs.remove(reg)
-            
+
     ulrres = []
+    if len(regs) == 0:
+        return ulrres
+            
     for i,reg in enumerate(regs[:-1]):
         if reg[0] <= 3:
             reg = list(range(1,reg[-1]+1))

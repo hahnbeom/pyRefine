@@ -113,6 +113,8 @@ def arg_parser(argv):
                      help="Allow jump DOF sampling of beta strands") # False by default
                       
     ### FragInsert
+    opt.add_argument('-keep_ulr_tors', default=False, action='store_true',
+                     help='preserve ulr torsion angles at the initial FT setup')
     opt.add_argument('-fragopt', default='single',
                      help='Fragment insertion type (single/mc)')
     opt.add_argument('-min_chunk_len', dest='min_chunk_len', nargs='+', type=int, default=[3,5,1000],
@@ -315,12 +317,13 @@ class Annealer:
 
     def initialize_pose_with_FT(self,pose,FTInfo,relax=True):
         # first make as extended at ulr
-        ulrres = []
-        for ulr in FTInfo.ulrs: ulrres += ulr
-        for resno in ulrres:
-            pose.set_phi(resno,-135.0)
-            pose.set_psi(resno, 135.0)
-            pose.set_omega(resno,180.0)
+        if not self.opt.keep_ulr_tors:
+            ulrres = []
+            for ulr in FTInfo.ulrs: ulrres += list(ulr)
+            for resno in ulrres:
+                pose.set_phi(resno,-135.0)
+                pose.set_psi(resno, 135.0)
+                pose.set_omega(resno,180.0)
 
         # check whether TERMdb declared in FTInfo; if not, pass
         #weight = np.array([len(jump.movesets) for jump in FTInfo.jumps],dtype='float16')
@@ -334,7 +337,7 @@ class Annealer:
                 jumpid = np.argmax(weight)
             else:
                 jumpid = random.choices(list(range(len(FTInfo.jumps))),weight)[0]
-            print("TERM search weight: ", weight, "selection opt=%s, jumpid:"%(self.opt.termsearch_mode,jumpid))
+            print("TERM search weight: ", weight, "selection opt=%s, jumpid: %d"%(self.opt.termsearch_mode,jumpid))
 
             # apply and select
             jump = FTInfo.jumps[jumpid]
@@ -364,7 +367,8 @@ class Annealer:
             print(Es)
         pose.dump_pdb('switch.pdb')
 
-        if relax:
+        # only if initially extended...
+        if relax and not self.opt.keep_ulr_tors:
             residue_weights = np.zeros(FTInfo.nres)
             for res in ulrres:
                 insertable = [res+k for k in range(9) if res+k in ulrres] #allow +-2 change
@@ -415,8 +419,9 @@ class Annealer:
             #self.opt.Pspline_on_fa=0.3 #==throw away if maxP in estogram lower than this val
 
             # refpose == pose0
+            print("ULR?", FTInfo.ulrs)
             ulrres = []
-            for ulr in FTInfo.ulrs: ulrres += ulr
+            for ulr in FTInfo.ulrs: ulrres += list(ulr)
             estogram2cst.apply_on_pose( pose,npz=self.opt.cen_cst,
                                         opt=self.opt,
                                         mask=ulrres )
